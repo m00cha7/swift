@@ -350,6 +350,17 @@ static void diagSyntacticUseRestrictions(TypeChecker &TC, const Expr *E,
             checkNoEscapeParameterUse(DRE, Call, OperandKind::Argument);
         });
       }
+
+      // SWIFT_ENABLE_TENSORFLOW
+      // Handle special rules for the #tfop syntax.
+      if (auto *OLE = dyn_cast<ObjectLiteralExpr>(E))
+        if (OLE->isTFOp()) {
+          argExprVisitArguments(OLE->getArg(),
+                                [&](unsigned argIndex, Expr *arg) {
+            if (auto *DRE = dyn_cast<DeclRefExpr>(arg))
+              checkNoEscapeParameterUse(DRE, OLE, OperandKind::Argument);
+          });
+        }
       
       // If we have an assignment expression, scout ahead for acceptable _'s.
       if (auto *AE = dyn_cast<AssignExpr>(E))
@@ -670,7 +681,8 @@ static void diagSyntacticUseRestrictions(TypeChecker &TC, const Expr *E,
       // either as the callee or as an argument (in which case, the typechecker
       // validates that the noescape bit didn't get stripped off), or as
       // a special case, e.g. in the binding of a withoutActuallyEscaping block
-      // or the argument of a type(of: ...).
+      // or the argument of a type(of: ...) or a differential operator such as
+      // #gradient(...).
       if (parent) {
         if (auto apply = dyn_cast<ApplyExpr>(parent)) {
           if (isa<ParamDecl>(DRE->getDecl()) && useKind == OperandKind::Callee)
@@ -681,9 +693,14 @@ static void diagSyntacticUseRestrictions(TypeChecker &TC, const Expr *E,
           return;
         } else if (isa<MakeTemporarilyEscapableExpr>(parent)) {
           return;
-        } else if (isa<DynamicTypeExpr>(parent)) {
+          // SWIFT_ENABLE_TENSORFLOW
+        } else if (auto *ole = dyn_cast<ObjectLiteralExpr>(parent)) {
+          if (ole->isTFOp()) return;
+        } else if (isa<DynamicTypeExpr>(parent) ||
+                   isa<ReverseAutoDiffExpr>(parent)) {
           return;
         }
+
       }
 
       TC.diagnose(DRE->getStartLoc(), diag::invalid_noescape_use,

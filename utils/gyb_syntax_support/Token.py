@@ -328,6 +328,21 @@ SYNTAX_TOKENS = [
          serialization_code=101),
     Misc('Yield', 'kw_yield', serialization_code=116, text='yield'),
 
+    # SWIFT_ENABLE_TENSORFLOW
+    PoundObjectLiteral('PoundTensorFlowOp', 'tfop', text='#tfop',
+                       serialization_code=117,
+                       description='TensorFlow operation',
+                       protocol='ExpressibleByTensorFlowOp'),
+    PoundKeyword('PoundGradient', 'gradient', text='#gradient',
+                 serialization_code=118),
+    PoundKeyword('PoundChainableGradient', 'chainableGradient',
+                 text='#chainableGradient', serialization_code=119),
+    PoundKeyword('PoundValueAndGradient', 'valueAndGradient',
+                 text='#valueAndGradient', serialization_code=120),
+    PoundKeyword('PoundAdjoint', 'adjoint', text='#adjoint',
+                 serialization_code=121),
+    PoundKeyword('PoundAssert', 'assert', text='#assert',
+                 serialization_code=122),
 ]
 
 SYNTAX_TOKEN_MAP = {token.name + 'Token': token for token in SYNTAX_TOKENS}

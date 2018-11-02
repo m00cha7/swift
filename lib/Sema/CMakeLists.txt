@@ -26,6 +26,9 @@ add_swift_library(swiftSema STATIC
   DerivedConformanceCodingKey.cpp
   DerivedConformanceEquatableHashable.cpp
   DerivedConformanceError.cpp
+  # SWIFT_ENABLE_TENSORFLOW
+  DerivedConformanceParameterGroup.cpp
+  DerivedConformanceParameterized.cpp
   DerivedConformanceRawRepresentable.cpp
   DerivedConformances.cpp
   InstrumenterSupport.cpp
@@ -40,6 +43,8 @@ add_swift_library(swiftSema STATIC
   TypeCheckAvailability.cpp
   TypeCheckCaptures.cpp
   TypeCheckCircularity.cpp
+  # SWIFT_ENABLE_TENSORFLOW
+  TypeCheckCompilerEvaluable.cpp
   TypeCheckConstraints.cpp
   TypeCheckDecl.cpp
   TypeCheckDeclObjC.cpp

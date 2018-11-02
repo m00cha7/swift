@@ -695,6 +695,7 @@ extension String : _ExpressibleByBuiltinStringLiteral {
       self = String(_StringGuts(small))
       return
     }
+
     if _fastPath(Bool(isASCII)) {
       self = String(_StringGuts(_large: _UnmanagedString(bufPtr)))
       return

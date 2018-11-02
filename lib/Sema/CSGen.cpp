@@ -22,6 +22,7 @@
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/SubstitutionMap.h"
+#include "swift/AST/TensorFlow.h"   // SWIFT_ENABLE_TENSORFLOW
 #include "swift/Sema/IDETypeChecking.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SetVector.h"
@@ -1295,10 +1296,259 @@ namespace {
       llvm_unreachable("Unhandled MagicIdentifierLiteralExpr in switch.");
     }
 
+    // SWIFT_ENABLE_TENSORFLOW
+    Type handleReverseAutoDiffExpr(ReverseAutoDiffExpr *GE,
+                                   bool preservingOriginalResult) {
+      auto &TC = CS.getTypeChecker();
+      auto *originalExpr = GE->getOriginalExpr();
+      auto locator = CS.getConstraintLocator(GE);
+      // The original type must be a function.
+      auto *originalTy = CS.getType(originalExpr)->getAs<AnyFunctionType>();
+      if (!originalTy) {
+        TC.diagnose(originalExpr->getLoc(),
+            diag::gradient_expr_not_a_function, CS.getType(originalExpr));
+        return nullptr;
+      }
+
+      // Compute the gradient type.
+      auto originalParams = originalTy->getParams();
+      auto *genSig = originalTy->getOptGenericSignature();
+      // Collect differentiation parameter types.
+      SmallVector<TupleTypeElt, 8> diffParamTypes;
+      // If no parameters are given, then differentiation is done with respect to
+      // all parameters (except self). The gradient's result type is all of the
+      // original parameters' types.
+      if (GE->getParameters().empty())
+        for (auto &originalParam : originalParams)
+          diffParamTypes.push_back(originalParam.getPlainType());
+      // If parameters are specified, collect and type-check those parameters.
+      else {
+        int lastIndex = -1;
+        for (auto &param : GE->getParameters()) {
+          auto index = param.index;
+          // Indices must be ascending.
+          if (lastIndex >= (int)index) {
+            TC.diagnose(param.loc,
+                        diag::gradient_expr_parameter_indices_not_ascending);
+            return nullptr;
+          }
+          // Indices cannot exceed the number of parameters in the original
+          // function.
+          if (index >= originalParams.size()) {
+            TC.diagnose(param.loc,
+                        diag::gradient_expr_parameter_index_out_of_bounds,
+                        originalTy, originalParams.size());
+            return nullptr;
+          }
+          // The parameter cannot be a reference object or a protocol
+          // existential.
+          auto paramTy = originalParams[index].getPlainType();
+          if (paramTy->isAnyClassReferenceType() ||
+              paramTy->isExistentialType()) {
+            TC.diagnose(param.loc, diag::gradient_expr_parameter_not_value_type,
+                        paramTy);
+            return nullptr;
+          }
+          lastIndex = index;
+          diffParamTypes.push_back(paramTy);
+        }
+      }
+
+      // Create a type for the gradient. The gradient has the same generic
+      // signature as the original function. The gradient's result types are
+      // what we collected in `diffParamTypes`.
+      Type gradResult = diffParamTypes.size() == 1
+        ? diffParamTypes.front().getType()
+        : TupleType::get(diffParamTypes, TC.Context);
+      // If preserving original result, then the gradient's result type is a tuple
+      // of the original result type with label "value" and `diffParamTypes` with
+      // label "gradient".
+      if (preservingOriginalResult) {
+        gradResult = TupleType::get({
+          TupleTypeElt(originalTy->getResult(),
+                       TC.Context.getIdentifier("value")),
+          TupleTypeElt(gradResult, TC.Context.getIdentifier("gradient"))
+        }, TC.Context);
+      }
+      AnyFunctionType *gradTy;
+      if (genSig)
+        gradTy = GenericFunctionType::get(genSig, originalParams,
+                                          gradResult, originalTy->getExtInfo());
+      else
+        gradTy = FunctionType::get(originalParams, gradResult,
+                                   originalTy->getExtInfo());
+
+      // Gradient expressions with generic originals must have a type that is
+      // convertible to the contextual type.
+      if (originalTy->hasTypeVariable())
+        if (auto contextualTy = CS.getContextualType(GE))
+          if (auto contextualGradTy = contextualTy->getAs<AnyFunctionType>())
+            CS.addConstraint(ConstraintKind::Conversion, contextualGradTy,
+                             gradTy, locator);
+
+      return gradTy;
+    }
+
+    Type visitGradientExpr(GradientExpr *GE) {
+      return handleReverseAutoDiffExpr(GE, /*preservingOriginalResult=*/false);
+    }
+    
+    Type visitChainableGradientExpr(ChainableGradientExpr *CGE) {
+      llvm_unreachable("Unhandled");
+    }
+
+    Type visitValueAndGradientExpr(ValueAndGradientExpr *VGE) {
+      return handleReverseAutoDiffExpr(VGE, /*preservingOriginalResult=*/true);
+    }
+
+    Type visitAdjointExpr(AdjointExpr *AE) {
+      // Note: This function performs the following steps:
+      // 1. Look up original function declaration using original function name
+      //    and, if defined, base type.
+      // 2. Verify that original function declaration has the @differentiable
+      //    attribute. Extract adjoint function from the attribute and store in
+      //    the AdjointExpr.
+      // 3. Constrain the type of the AdjointExpr to the expected type of the
+      //    adjoint function. The logic here is copied from other functions in
+      //    CSGen, namely `visitDeclRefExpr` and `visitUnresolvedDotExpr`.
+      auto &TC = CS.getTypeChecker();
+      auto &ctx = CS.getASTContext();
+      auto locator = CS.getConstraintLocator(AE);
+      auto originalName = AE->getOriginalName();
+      auto originalNameLoc = AE->getOriginalNameLoc();
+
+      // The original function declaration. This needs to be resolved.
+      FuncDecl *originalDecl = nullptr;
+      // The base type of the original function expression. This is relevant
+      // for type-checking the adjoint.
+      Type baseType;
+
+      if (auto repr = AE->getBaseType().getTypeRepr()) {
+        baseType = resolveTypeReferenceInExpression(repr);
+        if (baseType.isNull() || baseType->hasError()) {
+          TC.diagnose(AE->getBaseType().getLoc(),
+                      diag::adjoint_expr_original_base_type_unresolved, repr);
+          return nullptr;
+        }
+      }
+
+      // Prepare to look up the original function.
+      auto originalTypeCtx = CurDC->getInnermostTypeContext();
+      if (!originalTypeCtx) originalTypeCtx = CurDC;
+
+      auto overloadDiagnostic = [&]() {
+        TC.diagnose(originalNameLoc,
+                    diag::adjoint_expr_original_overload_not_found,
+                    originalName);
+      };
+      auto ambiguousDiagnostic = [&]() {
+        TC.diagnose(originalNameLoc,
+                    diag::adjoint_expr_ambiguous_original_function_identifier,
+                    originalName);
+      };
+      auto notFunctionDiagnostic = [&]() {
+        TC.diagnose(originalNameLoc,
+                    diag::adjoint_expr_original_not_func_decl,
+                    originalName);
+      };
+
+      // The original function must have the @differentiable attribute.
+      auto isValidOriginalDecl = [&](FuncDecl *candidate) {
+        return candidate->getAttrs().hasAttribute<DifferentiableAttr>();
+      };
+
+      NameLookupOptions lookupOptions = baseType
+        ? defaultMemberLookupOptions
+        : defaultUnqualifiedLookupOptions;
+
+      // Look up the original function.
+      originalDecl =
+        TC.lookupFuncDecl(originalName, originalNameLoc.getBaseNameLoc(),
+                          baseType, originalTypeCtx, isValidOriginalDecl,
+                          overloadDiagnostic, ambiguousDiagnostic,
+                          notFunctionDiagnostic, lookupOptions);
+      if (!originalDecl) return nullptr;
+
+      // Get the @differentiable attribute of the original func decl.
+      auto originalAttrs = originalDecl->getAttrs();
+      if (!originalAttrs.hasAttribute<DifferentiableAttr>()) {
+        TC.diagnose(originalNameLoc,
+                    diag::adjoint_expr_original_no_valid_differentiable_attr,
+                    originalDecl->getFullName());
+        return nullptr;
+      }
+      auto diffAttr = originalAttrs.getAttribute<DifferentiableAttr>();
+
+      // Set the adjoint function in the adjoint expression.
+      auto adjointDecl = diffAttr->getAdjointFunction();
+      assert(adjointDecl &&
+             "adjoint for valid @differentiable attribute should be defined");
+
+      // The adjoint decl ref is set here, without substitutions.
+      // The correct substitutions for the adjoint decl ref are set in CSApply.
+      AE->setAdjointFunction(adjointDecl);
+
+      // This is an inline version of `addMemberRefConstraints` that uses
+      // base type directly instead of taking a base expression.
+      auto addMemberRefConstraints =
+          [&](Expr *expr, FunctionRefKind funcRefKind) -> Type {
+        assert(baseType && "Base type must be set");
+        auto memberLocator =
+          CS.getConstraintLocator(expr, ConstraintLocator::Member);
+        auto tv = CS.createTypeVariable(memberLocator, TVO_CanBindToLValue);
+        OverloadChoice choice =
+          OverloadChoice(baseType, adjointDecl, funcRefKind);
+        CS.addBindOverloadConstraint(tv, choice, memberLocator, CurDC);
+        return tv;
+      };
+
+      // Add constraints on the type of the #adjoint expression.
+      // - If adjoint is within a type context (it is an instance/static
+      //   method), add member reference constraints.
+      // Code copied from `visitUnresolvedDotExpr`.
+      if (adjointDecl->getInnermostTypeContext()) {
+        if (!baseType) {
+          assert(adjointDecl->isInstanceMember() || adjointDecl->isStatic() &&
+                 "Expected adjoint to be an instance/static method");
+          auto methodContext = CurDC->getInnermostMethodContext();
+          baseType = methodContext->getImplicitSelfDecl()->getType();
+        }
+        if (adjointDecl->isInstanceMember())
+          baseType = MetatypeType::get(baseType, ctx);
+        if (baseType->hasUnboundGenericType())
+          baseType = CS.openUnboundGenericType(baseType, locator);
+        return addMemberRefConstraints(AE, AE->getFunctionRefKind());
+      }
+
+      // - Otherwise, if adjoint is a top-level function, create overload choice
+      //   and immediately resolve it.
+      // Code copied from `visitDeclRefExpr`.
+      auto tv = CS.createTypeVariable(locator, TVO_CanBindToLValue);
+      OverloadChoice choice(Type(), adjointDecl, AE->getFunctionRefKind());
+      CS.resolveOverload(locator, tv, choice, CurDC);
+      return tv;
+    }
+
+    Type visitPoundAssertExpr(PoundAssertExpr *PAE) {
+      // Constrain the condition argument to be Bool.
+      auto boolType = CS.getASTContext().getBoolDecl()->getDeclaredType();
+      CS.addConstraint(
+          ConstraintKind::ArgumentConversion, CS.getType(PAE->getCondition()),
+          boolType,
+          CS.getConstraintLocator(PAE, ConstraintLocator::ApplyArgument));
+
+      // #assert(...) has type Void.
+      return CS.getASTContext().TheEmptyTupleType;
+    }
+
     Type visitObjectLiteralExpr(ObjectLiteralExpr *expr) {
       // If the expression has already been assigned a type; just use that type.
       if (expr->getType())
         return expr->getType();
+
+      // SWIFT_ENABLE_TENSORFLOW
+      if (expr->isTFOp())
+        return visitTFOpExpr(expr);
 
       auto &tc = CS.getTypeChecker();
       auto protocol = tc.getLiteralProtocol(expr);
@@ -1348,6 +1598,91 @@ namespace {
         result = OptionalType::get(result);
 
       return result;
+    }
+
+    // SWIFT_ENABLE_TENSORFLOW
+    // #tfop is type checked and SILGen'd differently than the rest of the
+    // literals.  We really should use a completely separate AST node (rather
+    // that repurposing ObjectLiteralExpr) but that would be a substantially
+    // more invasive patch that we don't want to keep out of tree.
+    Type visitTFOpExpr(ObjectLiteralExpr *expr) {
+      assert(expr->isTFOp() && "Unexpected expression");
+      auto &tc = CS.getTypeChecker();
+      auto locator = CS.getConstraintLocator(expr);
+
+      // The TensorFlow module defines the "TensorHandle" type, which is the
+      // representation of a tensor value.  If we can't find it, then we reject
+      // uses of #tfop.
+      if (!tc.Context.getTensorHandleDecl()) {
+        tc.diagnose(expr->getLoc(), diag::invalid_tfop,
+                    "#tfop() may only be used in a module that imports TensorFlow");
+        return nullptr;
+      }
+
+      auto *tt = dyn_cast<TupleExpr>(expr->getArg());
+      if (!tt) {
+        // A one-element #tfop just takes an op name.
+        auto arg = expr->getArg()->getSemanticsProvidingExpr();
+        auto opname = dyn_cast<StringLiteralExpr>(arg);
+        if (!opname) {
+          tc.diagnose(expr->getLoc(), diag::invalid_tfop,
+                      "#tfop() takes a string literal and a list of inputs and "
+                      "attributes");
+          return nullptr;
+        }
+        return CS.createTypeVariable(locator, 0);
+      }
+
+      if (tt->getNumElements() == 0) {
+        tc.diagnose(expr->getLoc(), diag::invalid_tfop,
+                    "#tfop() takes a string literal and a list of inputs and "
+                    "attributes");
+        return nullptr;
+      }
+
+      // Check that we have a string literal.
+      auto opname = dyn_cast<StringLiteralExpr>(tt->getElement(0));
+      if (!opname) {
+        tc.diagnose(expr->getLoc(), diag::invalid_tfop,
+                    "#tfop() takes a string literal and a list of inputs and "
+                    "attributes");
+        return nullptr;
+      }
+
+      // Infer the argument types based on the constraint characters.
+      SmallVector<TupleTypeElt, 4> argTypes;
+
+      // The first operand should type check as strings.
+      auto stringType = tc.Context.getStringDecl()->getDeclaredType();
+      argTypes.push_back(TupleTypeElt(stringType));
+
+      // The #tfop list is a list of inputs (with no keyword arguments) followed
+      // by a list of attributes (with keyword arguments).  Add type constraints
+      // for each of them, and make sure there is no intermixing between the
+      // two lists.
+      bool sawAttribute = false;
+      for (unsigned i = 1, e = tt->getNumElements(); i != e; ++i) {
+        if (!tt->getElementName(i).empty()) {
+          sawAttribute = true;
+        } else if (sawAttribute) {
+          tc.diagnose(tt->getElement(i)->getStartLoc(), diag::invalid_tfop,
+                      "expected keyword argument for attribute name, "
+                      "or an additional letter in constraint string");
+          return nullptr;
+        }
+
+        // We infer the type of inputs from context.
+        auto ty = CS.createTypeVariable(locator, 0);
+        argTypes.push_back(TupleTypeElt(ty, tt->getElementName(i)));
+      }
+
+      // Now that we know what all of the arguments are supposed to be, add a
+      // constraint to the constraint system.
+      auto desiredArgTypes = TupleType::get(argTypes, tc.Context);
+      CS.addConstraint(
+          ConstraintKind::Conversion, CS.getType(tt), desiredArgTypes,
+          CS.getConstraintLocator(expr, ConstraintLocator::ApplyArgument));
+      return CS.createTypeVariable(locator, 0);
     }
 
     Type visitDeclRefExpr(DeclRefExpr *E) {

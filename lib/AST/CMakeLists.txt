@@ -3,6 +3,11 @@ if (SWIFT_FORCE_OPTIMIZED_TYPECHECKER)
   set(EXTRA_AST_FLAGS "FORCE_BUILD_OPTIMIZED")
 endif()
 
+if(SWIFT_ENABLE_TENSORFLOW)
+  find_package(TensorFlow REQUIRED)
+  include_directories(BEFORE "${TF_INCLUDE_DIR}")
+endif()
+
 add_swift_library(swiftAST STATIC
   AccessScopeChecker.cpp
   AccessRequests.cpp
@@ -15,6 +20,8 @@ add_swift_library(swiftAST STATIC
   ASTVerifier.cpp
   ASTWalker.cpp
   Attr.cpp
+  # SWIFT_ENABLE_TENSORFLOW
+  AutoDiff.cpp
   Availability.cpp
   AvailabilitySpec.cpp
   Builtins.cpp
@@ -33,6 +40,9 @@ add_swift_library(swiftAST STATIC
   GenericEnvironment.cpp
   GenericSignature.cpp
   GenericSignatureBuilder.cpp
+  # SWIFT_ENABLE_TENSORFLOW
+  GraphOperationBuilder.cpp
+  GraphOperationInfo.cpp
   Identifier.cpp
   InlinableText.cpp
   LayoutConstraint.cpp
@@ -54,6 +64,8 @@ add_swift_library(swiftAST STATIC
   Stmt.cpp
   SubstitutionMap.cpp
   SwiftNameTranslation.cpp
+  # SWIFT_ENABLE_TENSORFLOW
+  TensorFlow.cpp
   Type.cpp
   TypeCheckRequests.cpp
   TypeJoinMeet.cpp

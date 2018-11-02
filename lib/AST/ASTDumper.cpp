@@ -204,6 +204,8 @@ getSILFunctionTypeRepresentationString(SILFunctionType::Representation value) {
   case SILFunctionType::Representation::Thick: return "thick";
   case SILFunctionType::Representation::Block: return "block";
   case SILFunctionType::Representation::CFunctionPointer: return "c";
+  // SWIFT_ENABLE_TENSORFLOW
+  case SILFunctionType::Representation::TensorFlow: return "tensorflow";
   case SILFunctionType::Representation::Thin: return "thin";
   case SILFunctionType::Representation::Method: return "method";
   case SILFunctionType::Representation::ObjCMethod: return "objc_method";
@@ -1861,6 +1863,53 @@ public:
     PrintWithColorRAII(OS, ParenthesisColor) << ')';
   }
 
+  // SWIFT_ENABLE_TENSORFLOW
+  void printReverseAutoDiffExpr(ReverseAutoDiffExpr *E) {
+    OS << " original=";
+    E->getOriginalExpr()->dump(OS);
+    auto parameters = E->getParameters();
+    if (!parameters.empty()) {
+      OS << " wrt=(";
+      interleave(parameters, [&](const AutoDiffIndexParameter &param) {
+        OS << '.' << param.index;
+      }, [&]{
+        OS << ", ";
+      });
+      OS << ')';
+    }
+    OS << ')';
+  }
+
+  void visitGradientExpr(GradientExpr *E) {
+    printCommon(E, "gradient_expr");
+    printReverseAutoDiffExpr(E);
+  }
+  
+  void visitChainableGradientExpr(ChainableGradientExpr *E) {
+    printCommon(E, "chainable_gradient_expr");
+    printReverseAutoDiffExpr(E);
+  }
+
+  void visitValueAndGradientExpr(ValueAndGradientExpr *E) {
+    printCommon(E, "value_and_gradient_expr");
+    printReverseAutoDiffExpr(E);
+  }
+
+  void visitAdjointExpr(AdjointExpr *E) {
+    printCommon(E, "adjoint_expr");
+    PrintWithColorRAII(OS, TypeReprColor) << " base_type='";
+    if (auto *baseRepr = E->getBaseType().getTypeRepr())
+      baseRepr->print(PrintWithColorRAII(OS, TypeReprColor).getOS());
+    else
+      PrintWithColorRAII(OS, TypeReprColor) << "<<NULL>>";
+    PrintWithColorRAII(OS, TypeReprColor) << "'";
+    PrintWithColorRAII(OS, IdentifierColor) << " original_name='"
+      << E->getOriginalName() << "'";
+    PrintWithColorRAII(OS, ExprModifierColor)
+      << " function_ref=" << getFunctionRefKindStr(E->getFunctionRefKind());
+    PrintWithColorRAII(OS, ParenthesisColor) << ')';
+  }
+
   void visitObjectLiteralExpr(ObjectLiteralExpr *E) {
     printCommon(E, "object_literal") 
       << " kind='" << E->getLiteralKindPlainName() << "'";
@@ -2643,6 +2692,14 @@ public:
   void visitKeyPathDotExpr(KeyPathDotExpr *E) {
     printCommon(E, "key_path_dot_expr");
     PrintWithColorRAII(OS, ParenthesisColor) << ')';
+  }
+
+  // SWIFT_ENABLE_TENSORFLOW
+  void visitPoundAssertExpr(PoundAssertExpr *E) {
+    printCommon(E, "pound_assert");
+    OS << " message=" << QuotedString(E->getMessage()) << "\n";
+    printRec(E->getCondition());
+    OS << ")";
   }
 };
 

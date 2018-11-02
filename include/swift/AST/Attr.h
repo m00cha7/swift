@@ -33,6 +33,8 @@
 #include "swift/AST/PlatformKind.h"
 #include "swift/AST/Requirement.h"
 #include "swift/AST/TypeLoc.h"
+// SWIFT_ENABLE_TENSORFLOW
+#include "swift/AST/AutoDiff.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -45,6 +47,7 @@ class ASTContext;
 struct PrintOptions;
 class Decl;
 class ClassDecl;
+class FuncDecl;
 class GenericFunctionType;
 class LazyConformanceLoader;
 class TrailingWhereClause;
@@ -60,6 +63,8 @@ public:
   SourceLoc AtLoc;
   Optional<StringRef> convention = None;
   Optional<StringRef> conventionWitnessMethodProtocol = None;
+  // SWIFT_ENABLE_TENSORFLOW
+  Optional<std::pair<StringRef, int>> differentiabilityAndOrder = None;
 
   // For an opened existential type, the known ID.
   Optional<UUID> OpenedID;
@@ -106,6 +111,14 @@ public:
   
   bool hasConvention() const { return convention.hasValue(); }
   StringRef getConvention() const { return *convention; }
+
+  // SWIFT_ENABLE_TENSORFLOW
+  bool hasDifferentiability() const {
+    return differentiabilityAndOrder.hasValue();
+  }
+  std::pair<StringRef, int> getDifferentiabilityAndOrder() const {
+    return *differentiabilityAndOrder;
+  }
 
   bool hasOwnership() const {
     return getOwnership() != ReferenceOwnership::Strong;
@@ -1294,6 +1307,79 @@ public:
 
   static bool classof(const DeclAttribute *DA) {
     return DA->getKind() == DAK_ClangImporterSynthesizedType;
+  }
+};
+
+/// SWIFT_ENABLE_TENSORFLOW
+/// Attribute that marks a function differentiable and specifies the adjoint
+/// of the function. For example:
+///   @differentiable(reverse, adjoint: foo(_:_:seed:) where T : FloatingPoint)
+///   @differentiable(reverse, wrt: (self, .0, .1), adjoint: bar(_:_:_:seed:))
+class DifferentiableAttr : public DeclAttribute {
+public:
+  struct DeclNameWithLoc {
+    DeclName Name;
+    DeclNameLoc Loc;
+  };
+private:
+  /// Differentiation mode (forward or reverse).
+  AutoDiffMode Mode;
+  SourceLoc ModeLoc;
+  /// The number of parameters specified in 'wrt:'.
+  unsigned NumParameters;
+  /// The primal function.
+  Optional<DeclNameWithLoc> Primal;
+  /// The adjoint function.
+  Optional<DeclNameWithLoc> Adjoint;
+  /// The constraint clauses for generic types.
+  TrailingWhereClause *WhereClause = nullptr;
+  /// The primal function (optional), to be resolved by the type checker if
+  /// specified.
+  FuncDecl *PrimalFunction = nullptr;
+  /// The adjoint function, to be resolved by the type checker.
+  FuncDecl *AdjointFunction = nullptr;
+
+  explicit DifferentiableAttr(SourceLoc atLoc, SourceRange baseRange,
+                              AutoDiffMode mode, SourceLoc modeLoc,
+                              ArrayRef<AutoDiffParameter> parameters,
+                              Optional<DeclNameWithLoc> primal,
+                              Optional<DeclNameWithLoc> adjoint,
+                              TrailingWhereClause *clause);
+
+public:
+  static DifferentiableAttr *create(ASTContext &context, SourceLoc atLoc,
+                                    SourceRange baseRange, AutoDiffMode mode,
+                                    SourceLoc modeLoc,
+                                    ArrayRef<AutoDiffParameter> parameters,
+                                    Optional<DeclNameWithLoc> primal,
+                                    Optional<DeclNameWithLoc> adjoint,
+                                    TrailingWhereClause *clause);
+
+  AutoDiffMode getMode() const { return Mode; }
+  SourceLoc getModeLoc() const { return ModeLoc; }
+  Optional<DeclNameWithLoc> getPrimal() const { return Primal; }
+  Optional<DeclNameWithLoc> getAdjoint() const { return Adjoint; }
+
+  TrailingWhereClause *getWhereClause() const { return WhereClause; }
+
+  AutoDiffParameter *getParametersData() {
+    return reinterpret_cast<AutoDiffParameter *>(this+1);
+  }
+
+  /// The differentiation parameters, i.e. the list of parameters specified in
+  /// 'wrt:'.
+  ArrayRef<AutoDiffParameter> getParameters() const;
+  MutableArrayRef<AutoDiffParameter> getParameters() {
+    return { getParametersData(), NumParameters };
+  }
+
+  FuncDecl *getPrimalFunction() const { return PrimalFunction; }
+  void setPrimalFunction(FuncDecl *decl) { PrimalFunction = decl; }
+  FuncDecl *getAdjointFunction() const { return AdjointFunction; }
+  void setAdjointFunction(FuncDecl *decl) { AdjointFunction = decl; }
+
+  static bool classof(const DeclAttribute *DA) {
+    return DA->getKind() == DAK_Differentiable;
   }
 };
 

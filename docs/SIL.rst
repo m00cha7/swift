@@ -5415,6 +5415,71 @@ destination (if it returns with ``throw``).
 
 The rules on generic substitutions are identical to those of ``apply``.
 
+.. SWIFT_ENABLE_TENSORFLOW
+
+Automatic Differentiation
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These instructions perform automatic differentiation on functions. Currently,
+only reverse-mode differentiation is implemented, but eventually instructions
+for forward-mode differentiation may be added as well.
+
+.. SWIFT_ENABLE_TENSORFLOW
+
+gradient
+````````
+::
+
+  sil-instruction ::= 'gradient' sil-autodiff-param-indices?
+                      sil-autodiff-seedable? sil-autodiff-preserving-result?
+                      sil-value ':' sil-type
+  sil-autodiff-param-indices ::= '[' 'wrt' [0-9]+ (',' [0-9]+)* ']'
+  sil-autodiff-seedable ::= '[' 'seedable' ']'
+  sil-autodiff-preserving-result ::= '[' 'preserving_result' ']'
+
+  %original = function_ref @original : $(Float, Float) -> Float
+  %original_grad = gradient [wrt 0, 1] [preserving_result] \
+    %original : $(Float, Float) -> Float
+
+Computes the gradient function of a value ``%original`` using reverse-mode
+automatic differentiation.
+
+``%original`` must have function type and be differentiable.
+
+This instruction is only valid in raw SIL and is rewritten by the automatic
+differentiation pass.
+
+.. SWIFT_ENABLE_TENSORFLOW
+
+Graph Program Extraction
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+graph_op
+````````
+::
+
+  sil-instruction ::= 'graph_op' string-literal
+                      '(' (sil-operand (',' sil-operand)*)? ')'
+                      ('{' (sil-graph-op-attr (',' sil-graph-op-attr)*)? '}')?
+                      ':' sil-type (',' sil-type)*
+  sil-graph-op-attr ::= sil-identifier ':' sil-symbolic-value
+  sil-symbolic-value ::= i[0-9]+ int-literal |
+                         f(32|64) float-literal |
+                         sil-type |
+                         '[' (sil-symbolic-value (',' sil-symbolic-value)*)? ']'
+
+  %add = graph_op "tf.Add"(%x : $Tensor<Float>, %y : $Tensor<Float>) \
+    {T: $Float} : $Tensor<Float>
+
+Represents a graph program operation.
+
+``graph_op`` instructions have a name, zero or more operands, zero or more
+attributes (an identifier and SIL constant value), and one or more result
+types.
+
+This instruction is only valid in raw SIL and is rewritten and extracted by the
+graph program extraction passes (debastraction, partitioning, graph lowering).
+
 Assertion configuration
 ~~~~~~~~~~~~~~~~~~~~~~~
 

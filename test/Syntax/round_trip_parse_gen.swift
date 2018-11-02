@@ -463,6 +463,8 @@ func objectLiterals() {
   #fileLiteral(a)
   #colorLiteral(a, b)
   #imageLiteral(a, b, c)
+  // SWIFT_ENABLE_TENSORFLOW
+  #tfop("Add", a, b, T: Int32.self)
   #column
   #file
   #function
@@ -558,3 +560,29 @@ func foo() {}
 #sourceLocation()
 
 "abc \( } ) def"
+
+// SWIFT_ENABLE_TENSORFLOW
+@differentiable(reverse, adjoint: foo(_:_:))
+func bar(_ x: Float, _: Float) -> Float { return 1 }
+
+@differentiable(reverse, adjoint: foo(_:_:) where T : FloatingPoint)
+func bar<T : Numeric>(_ x: T, _: T) -> T { return 1 }
+
+@differentiable(reverse, wrt: (self, .0, .1), adjoint: foo(_:_:))
+func bar(_ x: Float, _: Float) -> Float { return 1 }
+
+@differentiable(reverse, wrt: (self, .0, .1), primal: bar, adjoint: foo(_:_:) where T : FloatingPoint)
+func bar<T : Numeric>(_ x: T, _: T) -> T { return 1 }
+
+#gradient(foo)
+#gradient(foo, wrt: .0, .1)
+#chainableGradient(foo, wrt: .0, .1)
+#valueAndGradient(foo, wrt: .0, .1)
+
+#adjoint(+)
+#adjoint(foo(_:_:))
+#adjoint(A.B.foo(_:))
+#adjoint(Tensor<Float>.+)
+
+#assert(true)
+#assert(1 == 2, "Error message")

@@ -47,9 +47,8 @@ protected:
   TypeSubstitutionMap OpenedExistentialSubs;
   SILOpenedArchetypesTracker OpenedArchetypesTracker;
 
-private:
-  /// MARK: Private state hidden from CRTP extensions.
-
+// SWIFT_ENABLE_TENSORFLOW
+protected:
   // The old-to-new value map.
   llvm::DenseMap<SILValue, SILValue> ValueMap;
 
@@ -57,6 +56,10 @@ private:
   /// blocks.
   llvm::DenseMap<SILBasicBlock*, SILBasicBlock*> BBMap;
 
+// SWIFT_ENABLE_TENSORFLOW
+
+ /// MARK: Private state hidden from CRTP extensions.
+private:
   // The original blocks in DFS preorder. All blocks in this list are mapped.
   // After cloning, this represents the entire cloned CFG.
   //
@@ -857,6 +860,17 @@ SILCloner<ImplClass>::visitEndApplyInst(EndApplyInst *Inst) {
   recordClonedInstruction(
       Inst, getBuilder().createEndApply(getOpLocation(Inst->getLoc()),
                                         getOpValue(Inst->getOperand())));
+}
+
+/// SWIFT_ENABLE_TENSORFLOW
+template<typename ImplClass>
+void
+SILCloner<ImplClass>::visitGradientInst(GradientInst *Inst) {
+  getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
+  recordClonedInstruction(Inst,
+    getBuilder().createGradient(getOpLocation(Inst->getLoc()),
+                                getOpValue(Inst->getOriginal()),
+                                Inst->getConfig()));
 }
 
 template<typename ImplClass>
@@ -1751,6 +1765,21 @@ void SILCloner<ImplClass>::visitDestructureTupleInst(
   recordClonedInstruction(
       Inst, getBuilder().createDestructureTuple(
                 getOpLocation(Inst->getLoc()), getOpValue(Inst->getOperand())));
+}
+
+// SWIFT_ENABLE_TENSORFLOW
+template <typename ImplClass>
+void SILCloner<ImplClass>::visitGraphOperationInst(GraphOperationInst *Inst) {
+  getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
+  auto arguments =
+    getOpValueArray<4>(OperandValueArrayRef(Inst->getArguments()));
+  SmallVector<SILType, 4> resultTypes;
+  for (auto result : Inst->getResults())
+    resultTypes.push_back(getOpType(result->getType()));
+  recordClonedInstruction(Inst,
+      getBuilder().createGraphOperation(getOpLocation(Inst->getLoc()),
+                                        Inst->getName(), arguments,
+                                        Inst->getAttributes(), resultTypes));
 }
 
 template <typename ImplClass>

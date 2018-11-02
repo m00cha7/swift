@@ -62,6 +62,20 @@ bool DerivedConformance::derivesProtocolConformance(DeclContext *DC,
     return canDeriveHashable(Nominal);
   }
 
+  // SWIFT_ENABLE_TENSORFLOW
+  // The only requirement for deriving Parameterized is that there exist some
+  // stored properties marked with @TFParameter. The `Parameters` struct can
+  // always be derived, even if parameters have different types.
+  if (*knownProtocol == KnownProtocolKind::Parameterized) {
+    SmallVector<VarDecl *, 8> params;
+    Nominal->getAllTFParameters(params);
+    return !params.empty();
+  }
+
+  // SWIFT_ENABLE_TENSORFLOW
+  if (*knownProtocol == KnownProtocolKind::ParameterGroup)
+    return canDeriveParameterGroup(Nominal);
+
   if (auto *enumDecl = dyn_cast<EnumDecl>(Nominal)) {
     switch (*knownProtocol) {
         // The presence of a raw type is an explicit declaration that
@@ -192,6 +206,11 @@ ValueDecl *DerivedConformance::getDerivableRequirement(TypeChecker &tc,
     if (name.isSimpleName(ctx.Id_intValue))
       return getRequirement(KnownProtocolKind::CodingKey);
 
+    // SWIFT_ENABLE_TENSORFLOW
+    // Parameterized.allParameters
+    if (name.isSimpleName(ctx.Id_allParameters))
+      return getRequirement(KnownProtocolKind::Parameterized);
+
     return nullptr;
   }
 
@@ -212,6 +231,18 @@ ValueDecl *DerivedConformance::getDerivableRequirement(TypeChecker &tc,
       auto argumentNames = name.getArgumentNames();
       if (argumentNames.size() == 1 && argumentNames[0] == ctx.Id_into)
         return getRequirement(KnownProtocolKind::Hashable);
+    }
+
+    // SWIFT_ENABLE_TENSORFLOW
+    // ParameterGroup.update(withGradients:_:)
+    if (name.isCompoundName() &&
+        name.getBaseName() == ctx.getIdentifier("update")) {
+      auto argumentNames = name.getArgumentNames();
+      if (argumentNames.size() == 2 &&
+          argumentNames[0] == ctx.getIdentifier("withGradients") &&
+          argumentNames[1].empty()) {
+        return getRequirement(KnownProtocolKind::ParameterGroup);
+      }
     }
 
     return nullptr;
@@ -247,6 +278,16 @@ ValueDecl *DerivedConformance::getDerivableRequirement(TypeChecker &tc,
     // CaseIterable.AllCases
     if (name.isSimpleName(ctx.Id_AllCases))
       return getRequirement(KnownProtocolKind::CaseIterable);
+
+    // SWIFT_ENABLE_TENSORFLOW
+    // Parameterized.Parameters
+    if (name.isSimpleName(ctx.Id_Parameters))
+      return getRequirement(KnownProtocolKind::Parameterized);
+
+    // SWIFT_ENABLE_TENSORFLOW
+    // ParameterGroup.Parameter
+    if (name.isSimpleName(ctx.Id_Parameter))
+      return getRequirement(KnownProtocolKind::ParameterGroup);
 
     return nullptr;
   }
@@ -314,6 +355,49 @@ DerivedConformance::declareDerivedPropertyGetter(TypeChecker &tc,
   tc.Context.addSynthesizedDecl(getterDecl);
 
   return getterDecl;
+}
+
+// SWIFT_ENABLE_TENSORFLOW
+AccessorDecl *
+DerivedConformance::declareDerivedPropertySetter(TypeChecker &tc,
+                                                 VarDecl *property,
+                                                 Type propertyContextType) {
+  bool isStatic = property->isStatic();
+  bool isFinal = property->isFinal();
+
+  auto &C = tc.Context;
+  auto parentDC = property->getDeclContext();
+
+  auto propertyInterfaceType = property->getInterfaceType();
+  auto propertyParam = new (C)
+    ParamDecl(VarDecl::Specifier::Default, SourceLoc(), SourceLoc(),
+              Identifier(), property->getLoc(), C.getIdentifier("newValue"),
+              parentDC);
+  propertyParam->setInterfaceType(propertyInterfaceType);
+
+  ParameterList *params = ParameterList::create(C, propertyParam);
+
+  auto setterDecl = AccessorDecl::create(C,
+    /*FuncLoc*/ SourceLoc(), /*AccessorKeywordLoc*/ SourceLoc(),
+    AccessorKind::Set, AddressorKind::NotAddressor, property,
+    /*StaticLoc*/ SourceLoc(), StaticSpellingKind::None,
+    /*Throws*/ false, /*ThrowsLoc*/ SourceLoc(),
+    /*GenericParams*/ nullptr, params, TypeLoc(), parentDC);
+  setterDecl->setImplicit();
+  setterDecl->setStatic(isStatic);
+  setterDecl->setSelfAccessKind(SelfAccessKind::Mutating);
+
+  // If this is supposed to be a final method, mark it as such.
+  assert(isFinal || !parentDC->getSelfClassDecl());
+  if (isFinal && parentDC->getSelfClassDecl() &&
+      !setterDecl->isFinal())
+    setterDecl->getAttrs().add(new (C) FinalAttr(/*Implicit*/ true));
+  setterDecl->computeType();
+  setterDecl->copyFormalAccessFrom(property);
+  setterDecl->setValidationToChecked();
+
+  C.addSynthesizedDecl(setterDecl);
+  return setterDecl;
 }
 
 std::pair<VarDecl *, PatternBindingDecl *>

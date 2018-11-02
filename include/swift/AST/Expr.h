@@ -25,6 +25,8 @@
 #include "swift/AST/TypeAlignments.h"
 #include "swift/AST/TypeLoc.h"
 #include "swift/AST/TypeRepr.h"
+// SWIFT_ENABLE_TENSORFLOW
+#include "swift/AST/AutoDiff.h"
 #include "swift/AST/Availability.h"
 #include "swift/Basic/InlineBitfield.h"
 #include "llvm/Support/TrailingObjects.h"
@@ -340,6 +342,11 @@ protected:
     : NumPadBits,
     /// # of argument labels stored after the CallExpr.
     NumArgLabels : 16
+  );
+
+  // SWIFT_ENABLE_TENSORFLOW
+  SWIFT_INLINE_BITFIELD(AdjointExpr, Expr, 2,
+                        FunctionRefKind : 2
   );
 
   enum { NumCheckedCastKindBits = 4 };
@@ -1113,6 +1120,13 @@ public:
 
   LiteralKind getLiteralKind() const {
     return static_cast<LiteralKind>(Bits.ObjectLiteralExpr.LitKind);
+  }
+
+  // SWIFT_ENABLE_TENSORFLOW
+  /// Return true if this object literal is the #tfop(...) op descriptor for
+  /// TensorFlow.
+  bool isTFOp() const {
+    return getLiteralKind() == LiteralKind::tfop;
   }
 
   Expr *getArg() const { return Arg; }
@@ -3806,9 +3820,211 @@ public:
   }
 };
 
-/// An expression referring to an opaque object of a fixed type.
+/// SWIFT_ENABLE_TENSORFLOW
+/// Base class for differential operators, such as `#gradient`,
+/// `#chainableGradient`, and `#valueAndGradient`.
+class ReverseAutoDiffExpr : public Expr {
+public:
+  Expr *getOriginalExpr() const {
+    return OriginalExpr;
+  }
+
+  void setOriginalExpr(Expr *newOriginal) {
+    OriginalExpr = newOriginal;
+  }
+
+  AutoDiffIndexParameter *getParametersData() {
+    return reinterpret_cast<AutoDiffIndexParameter *>(this+1);
+  }
+
+  ArrayRef<AutoDiffIndexParameter> getParameters() const;
+
+  MutableArrayRef<AutoDiffIndexParameter> getParameters() {
+    return { getParametersData(), NumParameters };
+  }
+  
+  unsigned getResultIndex() const {
+    return ResultIndex;
+  }
+
+  SourceRange getSourceRange() const {
+    return SourceRange(Loc, RParenLoc);
+  }
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::Gradient ||
+           E->getKind() == ExprKind::ValueAndGradient;
+  }
+
+private:
+  /// The start location of this expression.
+  SourceLoc Loc;
+  /// The location of '(' right after '#gradient'.
+  SourceLoc LParenLoc;
+  /// The expression representing the function to be differentiated.
+  Expr *OriginalExpr;
+  /// The number of parameters in the parameter list.
+  unsigned NumParameters;
+  /// The index of the result to differentiate from.
+  unsigned ResultIndex;
+  /// The location of ')'.
+  SourceLoc RParenLoc;
+
+protected:
+  explicit ReverseAutoDiffExpr(ExprKind kind, SourceLoc loc,
+                               SourceLoc lParenLoc,
+                               Expr *originalExpr,
+                               ArrayRef<AutoDiffIndexParameter> parameters,
+                               unsigned resultIndex, SourceLoc rParenLoc);
+};
+
+/// Gradient expression - An expression that produces the automatically
+/// differentiated function that computes the gradient (or vector-Jacobian
+/// products) with respect to specified parameters.
+/// Examples:
+///   #gradient(baz)
+///   #gradient(bar, wrt: .0, .1)
+///   #gradient(foo(_:_:), wrt: .0)
 ///
-/// Opaque value expressions occur when a particular value within the AST
+class GradientExpr : public ReverseAutoDiffExpr {
+public:
+  static GradientExpr *create(ASTContext &ctx, SourceLoc loc,
+                              SourceLoc lParenLoc, Expr *originalExpr,
+                              ArrayRef<AutoDiffIndexParameter> parameters,
+                              unsigned resultIndex, SourceLoc rParenLoc);
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::Gradient;
+  }
+
+private:
+  explicit GradientExpr(SourceLoc loc, SourceLoc lParenLoc, Expr *originalExpr,
+                        ArrayRef<AutoDiffIndexParameter> params,
+                        unsigned resultIndex, SourceLoc rParenLoc)
+    : ReverseAutoDiffExpr(ExprKind::Gradient, loc, lParenLoc, originalExpr,
+                          params, resultIndex, rParenLoc) {}
+};
+  
+/// Chainable gradient expression - An expression that produces the
+/// automatically differentiated function that computes the gradient (or
+/// vector-Jacobian products) with respect to specified parameters, taking an
+/// extra result-typed argument representing the seed, i.e. the backpropagated
+/// adjoint.
+/// Examples:
+///   #chainableGradient(baz)
+///   #chainableGradient(bar, wrt: .0, .1)
+///   #chainableGradient(foo(_:_:), wrt: .0)
+///
+class ChainableGradientExpr : public ReverseAutoDiffExpr {
+public:
+  static ChainableGradientExpr *create(ASTContext &ctx, SourceLoc loc,
+                                       SourceLoc lParenLoc, Expr *originalExpr,
+                                   ArrayRef<AutoDiffIndexParameter> parameters,
+                                       unsigned resultIndex,
+                                       SourceLoc rParenLoc);
+  
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::ChainableGradient;
+  }
+  
+private:
+  explicit ChainableGradientExpr(SourceLoc loc, SourceLoc lParenLoc,
+                                 Expr *originalExpr,
+                                 ArrayRef<AutoDiffIndexParameter> params,
+                                 unsigned resultIndex, SourceLoc rParenLoc)
+  : ReverseAutoDiffExpr(ExprKind::ChainableGradient, loc, lParenLoc,
+                        originalExpr, params, resultIndex, rParenLoc) {}
+};
+
+/// ValueAndGradient expression - An expression that produces an automatically
+/// differentiated function that returns the result of the original function and
+/// the gradient (or vector-Jacobian products) with respect to specified
+/// parameters.
+/// Examples:
+///   #valueAndGradient(baz)
+///   #valueAndGradient(bar, wrt: .0, .1)
+///   #valueAndGradient(foo(_:_:), wrt: .0)
+///
+class ValueAndGradientExpr : public ReverseAutoDiffExpr {
+public:
+  static ValueAndGradientExpr *create(ASTContext &ctx, SourceLoc loc,
+                                      SourceLoc lParenLoc, Expr *originalExpr,
+                                      ArrayRef<AutoDiffIndexParameter> params,
+                                      unsigned resultIndex,
+                                      SourceLoc rParenLoc);
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::ValueAndGradient;
+  }
+
+private:
+  explicit ValueAndGradientExpr(SourceLoc loc, SourceLoc lParenLoc,
+                                Expr *originalExpr,
+                                ArrayRef<AutoDiffIndexParameter> params,
+                                unsigned resultIndex, SourceLoc rParenLoc)
+    : ReverseAutoDiffExpr(ExprKind::ValueAndGradient, loc, lParenLoc,
+                          originalExpr, params, resultIndex, rParenLoc) {}
+};
+
+/// The `#adjoint(...)` expression returns the declared adjoint of functions
+/// with the `@differentiable(reverse, ...)` attribute.
+class AdjointExpr : public Expr {
+private:
+  SourceLoc Loc, LParenLoc;
+  // The original function name.
+  DeclName OriginalName;
+  DeclNameLoc OriginalNameLoc;
+  // The base type of the original function.
+  // This is non-null only when the original function is not top-level (i.e. it
+  // is an instance/static method).
+  TypeLoc BaseType;
+  // The resolved adjoint function declaration.
+  ConcreteDeclRef AdjointFunction = nullptr;
+  SourceLoc RParenLoc;
+
+  explicit AdjointExpr(SourceLoc loc, SourceLoc lParenLoc,
+                       DeclName originalName, DeclNameLoc originalNameLoc,
+                       TypeLoc baseType, SourceLoc rParenLoc)
+    : Expr(ExprKind::Adjoint, /*Implicit*/ false), Loc(loc),
+      LParenLoc(lParenLoc), OriginalName(originalName),
+      OriginalNameLoc(originalNameLoc), BaseType(baseType),
+      RParenLoc(rParenLoc) {
+    Bits.AdjointExpr.FunctionRefKind =
+      static_cast<unsigned>(FunctionRefKind::Unapplied);
+  }
+
+public:
+  static AdjointExpr *create(ASTContext &ctx, SourceLoc loc,
+                             SourceLoc lParenLoc, DeclName originalName,
+                             DeclNameLoc originalNameLoc, TypeRepr *baseType,
+                             SourceLoc rParenLoc);
+
+  DeclName getOriginalName() const { return OriginalName; }
+  DeclNameLoc getOriginalNameLoc() const { return OriginalNameLoc; }
+  TypeLoc getBaseType() const { return BaseType; }
+
+  ConcreteDeclRef getAdjointFunction() { return AdjointFunction; }
+  void setAdjointFunction(ConcreteDeclRef ref) { AdjointFunction = ref; }
+
+  SourceRange getSourceRange() const { return SourceRange(Loc, RParenLoc); }
+
+  /// Retrieve the kind of function reference.
+  FunctionRefKind getFunctionRefKind() const {
+    return static_cast<FunctionRefKind>(Bits.AdjointExpr.FunctionRefKind);
+  }
+
+  /// Set the kind of function reference.
+  void setFunctionRefKind(FunctionRefKind refKind) {
+    Bits.AdjointExpr.FunctionRefKind = static_cast<unsigned>(refKind);
+  }
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::Adjoint;
+  }
+};
+
+/// An expression referring to an opaque object of a fixed type.
+/// /// Opaque value expressions occur when a particular value within the AST
 /// needs to be re-used without being re-evaluated or for a value that is
 /// a placeholder. OpaqueValueExpr nodes are introduced by some other AST
 /// node (say, a \c DynamicMemberRefExpr) and can only be used within the
@@ -5159,6 +5375,36 @@ public:
 
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::KeyPathDot;
+  }
+};
+
+// SWIFT_ENABLE_TENSORFLOW
+/// PoundAssertExpr - Asserts that a condition is true, at compile time.
+class PoundAssertExpr : public Expr {
+  SourceLoc StartLoc;
+  SourceLoc EndLoc;
+  Expr *Condition;
+  StringRef Message;
+
+ public:
+  PoundAssertExpr(SourceLoc startLoc, SourceLoc endLoc, Expr *condition,
+                  StringRef message)
+      : Expr(ExprKind::PoundAssert, /*Implicit=*/false),
+        StartLoc(startLoc),
+        EndLoc(endLoc),
+        Condition(condition),
+        Message(message) {}
+
+  SourceLoc getStartLoc() const { return StartLoc; }
+  SourceLoc getEndLoc() const { return EndLoc; }
+
+  Expr *getCondition() const { return Condition; }
+  StringRef getMessage() const { return Message; }
+
+  void setCondition(Expr *condition) { Condition = condition; }
+
+  static bool classof(const Expr *S) {
+    return S->getKind() == ExprKind::PoundAssert;
   }
 };
 

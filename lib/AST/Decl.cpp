@@ -3011,6 +3011,17 @@ bool NominalTypeDecl::isOptionalDecl() const {
   return this == getASTContext().getOptionalDecl();
 }
 
+// SWIFT_ENABLE_TENSORFLOW
+void
+NominalTypeDecl::getAllTFParameters(SmallVectorImpl<VarDecl *> &result) const {
+  for (auto member : getMembers()) {
+    auto varDecl = dyn_cast<VarDecl>(member);
+    if (!varDecl) continue;
+    if (varDecl->getAttrs().hasAttribute<TFParameterAttr>())
+      result.push_back(varDecl);
+  }
+}
+
 GenericTypeDecl::GenericTypeDecl(DeclKind K, DeclContext *DC,
                                  Identifier name, SourceLoc nameLoc,
                                  MutableArrayRef<TypeLoc> inherited,

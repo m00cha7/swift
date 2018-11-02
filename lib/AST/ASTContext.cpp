@@ -146,6 +146,17 @@ struct ASTContext::Implementation {
   /// The AnyObject type.
   CanType AnyObjectType;
 
+  // SWIFT_ENABLE_TENSORFLOW
+  /// The declaration of TensorFlow.TensorHandle<T>.
+  ClassDecl *TensorHandleDecl = nullptr;
+  /// The declaration of TensorFlow.TensorShape.
+  StructDecl *TensorShapeDecl = nullptr;
+  /// The declaration of TensorFlow.TensorDataType.
+  StructDecl *TensorDataTypeDecl = nullptr;
+
+  /// The declaration of Swift._AutoDiffTape<T>.
+  ClassDecl *AutoDiffTapeDecl = nullptr;
+
 #define KNOWN_STDLIB_TYPE_DECL(NAME, DECL_CLASS, NUM_GENERIC_PARAMS) \
   /** The declaration of Swift.NAME. */ \
   DECL_CLASS *NAME##Decl = nullptr;
@@ -368,6 +379,10 @@ FOR_KNOWN_FOUNDATION_TYPES(CACHE_FOUNDATION_DECL)
   llvm::FoldingSet<GenericSignature> GenericSignatures;
   llvm::FoldingSet<DeclName::CompoundDeclName> CompoundNames;
   llvm::DenseMap<UUID, ArchetypeType *> OpenedExistentialArchetypes;
+
+  // SWIFT_ENABLE_TENSORFLOW
+  /// A cache of tangent spaces per type.
+  llvm::DenseMap<CanType, Optional<TangentSpace>> TangentSpaces;
 
   /// List of Objective-C member conflicts we have found during type checking.
   std::vector<ObjCMethodConflict> ObjCMethodConflicts;
@@ -792,6 +807,76 @@ CanType ASTContext::getAnyObjectType() const {
   return getImpl().AnyObjectType;
 }
 
+// SWIFT_ENABLE_TENSORFLOW
+/// Retrieve the decl for TensorFlow.TensorHandle iff the TensorFlow module has
+/// been imported.  Otherwise, this returns null.
+ClassDecl *ASTContext::getTensorHandleDecl() const {
+  if (getImpl().TensorHandleDecl)
+    return getImpl().TensorHandleDecl;
+
+  // See if the TensorFlow module was imported.  If not, return null.
+  auto tfModule = getLoadedModule(Id_TensorFlow);
+  if (!tfModule)
+    return nullptr;
+
+  SmallVector<ValueDecl *, 1> results;
+  tfModule->lookupValue({ }, getIdentifier("TensorHandle"),
+                        NLKind::UnqualifiedLookup, results);
+
+  for (auto result : results)
+    if (auto CD = dyn_cast<ClassDecl>(result))
+      return getImpl().TensorHandleDecl = CD;
+  return nullptr;
+}
+
+/// Retrieve the decl for TensorFlow.TensorShape iff the TensorFlow module has
+/// been imported.  Otherwise, this returns null.
+StructDecl *ASTContext::getTensorShapeDecl() const {
+  if (getImpl().TensorShapeDecl)
+    return getImpl().TensorShapeDecl;
+
+  // See if the TensorFlow module was imported.  If not, return null.
+  auto tfModule = getLoadedModule(Id_TensorFlow);
+  if (!tfModule)
+    return nullptr;
+
+  SmallVector<ValueDecl *, 1> results;
+  tfModule->lookupValue({}, getIdentifier("TensorShape"),
+                        NLKind::UnqualifiedLookup, results);
+
+  for (auto result : results)
+    if (auto CD = dyn_cast<StructDecl>(result))
+      return getImpl().TensorShapeDecl = CD;
+  return nullptr;
+}
+
+/// Retrieve the decl for TensorFlow.TensorDataType iff the TensorFlow module has
+/// been imported.  Otherwise, this returns null.
+StructDecl *ASTContext::getTensorDataTypeDecl() const {
+  if (getImpl().TensorDataTypeDecl)
+    return getImpl().TensorDataTypeDecl;
+
+  // See if the TensorFlow module was imported.  If not, return null.
+  auto tfModule = getLoadedModule(Id_TensorFlow);
+  if (!tfModule)
+    return nullptr;
+
+  SmallVector<ValueDecl *, 1> results;
+  tfModule->lookupValue({}, getIdentifier("TensorDataType"),
+                        NLKind::UnqualifiedLookup, results);
+
+  for (auto result : results)
+    if (auto CD = dyn_cast<StructDecl>(result))
+      return getImpl().TensorDataTypeDecl = CD;
+  return nullptr;
+}
+
+CanType ASTContext::getAutoDiffTapeType() const {
+  if (auto adtDecl = get_AutoDiffTapeDecl())
+    return adtDecl->getDeclaredType()->getCanonicalType();
+  return CanType();
+}
+
 CanType ASTContext::getNeverType() const {
   auto neverDecl = getNeverDecl();
   if (!neverDecl)
@@ -882,6 +967,16 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
     break;
   case KnownProtocolKind::CFObject:
     M = getLoadedModule(Id_CoreFoundation);
+    break;
+  // SWIFT_ENABLE_TENSORFLOW
+  case KnownProtocolKind::AccelerableByTensorFlow:
+  case KnownProtocolKind::ParameterGroup:
+  case KnownProtocolKind::Parameterized:
+  case KnownProtocolKind::InputTensorGroup:
+  case KnownProtocolKind::OutputTensorGroup:
+  case KnownProtocolKind::TensorSendableReceivable:
+  case KnownProtocolKind::TensorProtocol:
+    M = getLoadedModule(Id_TensorFlow);
     break;
   default:
     M = getStdlibModule();
@@ -1777,7 +1872,9 @@ ASTContext::getModule(ArrayRef<std::pair<Identifier, SourceLoc>> ModulePath) {
     if (ModuleDecl *M = importer->loadModule(moduleID.second, ModulePath)) {
       if (ModulePath.size() == 1 &&
           (ModulePath[0].first == StdlibModuleName ||
-           ModulePath[0].first == Id_Foundation))
+           ModulePath[0].first == Id_Foundation ||
+           // SWIFT_ENABLE_TENSORFLOW
+           ModulePath[0].first == Id_TensorFlow))
         recordKnownProtocols(M);
       return M;
     }
@@ -3718,7 +3815,9 @@ void AnyFunctionType::decomposeInput(
   default:
     result.emplace_back(type->getInOutObjectType(), Identifier(),
                         ParameterTypeFlags::fromParameterType(
-                          type, false, ValueOwnership::Default));
+                          // SWIFT_ENABLE_TENSORFLOW
+                          type, false, ValueOwnership::Default,
+                          /*nonDifferentiable*/ false));
     return;
   }
 }
@@ -5085,4 +5184,89 @@ LayoutConstraint LayoutConstraint::getLayoutConstraint(LayoutConstraintKind Kind
   return LayoutConstraint(New);
 }
 
+// SWIFT_ENABLE_TENSORFLOW
+bool ASTContext::isDifferentiable(CanType type, ModuleDecl *module) {
+  return getTangentSpace(type, module).hasValue();
+}
 
+Optional<TangentSpace> ASTContext::getTangentSpace(CanType type,
+                                                   ModuleDecl *module) {
+  auto lookup = getImpl().TangentSpaces.find(type);
+  if (lookup != getImpl().TangentSpaces.end())
+    return lookup->getSecond();
+  // A helper that is used to cache the computed tangent space for the
+  // specified type and retuns the same tangent space.
+  auto cache = [&](Optional<TangentSpace> tangentSpace) {
+    getImpl().TangentSpaces.insert({type, tangentSpace});
+    return tangentSpace;
+  };
+  // `Builtin.FP<...>` is a builtin real scalar space.
+  if (auto *fpType = type->getAs<BuiltinFloatType>())
+    return cache(TangentSpace::getBuiltinRealScalarSpace(fpType));
+  // Look up conformance to `FloatingPoint`.
+  auto *fpProto = getProtocol(KnownProtocolKind::FloatingPoint);
+  if (auto maybeFPConf = module->lookupConformance(type, fpProto)) {
+    auto *typeDecl = type->getAnyNominal();
+    assert(typeDecl);
+    return cache(TangentSpace::getRealScalarSpace(typeDecl));
+  }
+  // Look up conformance to `Differentiable`.
+  auto *diffableProto = getProtocol(KnownProtocolKind::Differentiable);
+  if (auto maybeDiffableConf = module->lookupConformance(type, diffableProto)) {
+    auto tangentLookup =
+        diffableProto->lookupDirect(getIdentifier("TangentVector"));
+    auto *tangentAssocDecl = cast<AssociatedTypeDecl>(tangentLookup[0]);
+    auto subMap = type->getMemberSubstitutionMap(module, tangentAssocDecl);
+    auto tangent = tangentAssocDecl->getDeclaredInterfaceType().subst(subMap);
+    auto *tangentDecl = tangent->getAnyNominal();
+    assert(tangentDecl &&
+           "Tangent must be a nominal type because it has protocol contraints");
+    return cache(TangentSpace::getRealVectorSpace(tangentDecl));
+  }
+  // Nominal types can be either a struct or an enum.
+  if (auto *nominal = type->getAnyNominal()) {
+    // Fixed-layout struct types, each of whose elements has a tangent space,
+    // are a product of those tangent spaces.
+    if (auto *structDecl = dyn_cast<StructDecl>(nominal)) {
+      if (structDecl->getFormalAccess() >= AccessLevel::Public &&
+          !structDecl->getAttrs().hasAttribute<FixedLayoutAttr>())
+        return cache(None);
+      auto allMembersHaveTangentSpace =
+          llvm::all_of(structDecl->getStoredProperties(), [&](VarDecl *v) {
+            return (bool)getTangentSpace(v->getType()->getCanonicalType(),
+                                         module);
+          });
+      if (allMembersHaveTangentSpace)
+        return cache(TangentSpace::getProductStruct(structDecl));
+    }
+    // Frozen enum types, all of whose payloads have a tangent space, are a
+    // sum of the product of payloads in each case.
+    if (auto *enumDecl = dyn_cast<EnumDecl>(nominal)) {
+      if (enumDecl->getFormalAccess() >= AccessLevel::Public &&
+          !enumDecl->getAttrs().hasAttribute<FrozenAttr>())
+        return cache(None);
+      if (enumDecl->isIndirect())
+        return cache(None);
+      auto allMembersHaveTangentSpace =
+        llvm::all_of(enumDecl->getAllCases(), [&](EnumCaseDecl *cd) {
+          return llvm::all_of(cd->getElements(), [&](EnumElementDecl *eed) {
+            return llvm::all_of(*eed->getParameterList(), [&](ParamDecl *pd) {
+              return (bool)
+                  getTangentSpace(pd->getType()->getCanonicalType(), module);
+            });
+          });
+        });
+      if (allMembersHaveTangentSpace)
+        return cache(TangentSpace::getSum(enumDecl));
+    }
+  }
+  // Tuple types, each of whose elements has a tangent space, are a product of
+  // those tangent space.
+  if (TupleType *tupleType = type->getAs<TupleType>())
+    if (llvm::all_of(tupleType->getElementTypes(), [&](Type t) {
+            return (bool)getTangentSpace(t->getCanonicalType(), module); }))
+      return cache(TangentSpace::getProductTuple(tupleType));
+  // Otherwise, the type does not have a tangent space. That is, it does not
+  // support differentiation.
+  return cache(None);
+}

@@ -103,6 +103,8 @@ namespace swift {
   class TypeAliasDecl;
   class VarDecl;
   class UnifiedStatsReporter;
+  // SWIFT_ENABLE_TENSORFLOW
+  class TangentSpace;
 
   enum class KnownProtocolKind : uint8_t;
 
@@ -286,12 +288,12 @@ private:
 
   /// Cache of module names that fail the 'canImport' test in this context.
   llvm::SmallPtrSet<Identifier, 8> FailedModuleImportNames;
-  
+
+public:
   /// \brief Retrieve the allocator for the given arena.
   llvm::BumpPtrAllocator &
   getAllocator(AllocationArena arena = AllocationArena::Permanent) const;
 
-public:
   /// Allocate - Allocate memory from the ASTContext bump pointer.
   void *Allocate(unsigned long bytes, unsigned alignment,
                  AllocationArena arena = AllocationArena::Permanent) const {
@@ -463,6 +465,22 @@ public:
 
   /// Retrieve the type Swift.AnyObject.
   CanType getAnyObjectType() const;
+
+  // SWIFT_ENABLE_TENSORFLOW
+  /// Retrieve the decl for TensorFlow.TensorHandle iff the TensorFlow module
+  /// has been imported.  Otherwise, this returns null.
+  ClassDecl *getTensorHandleDecl() const;
+
+  /// Retrieve the decl for TensorFlow.TensorShape iff the TensorFlow module
+  /// has been imported.  Otherwise, this returns null.
+  StructDecl *getTensorShapeDecl() const;
+
+  /// Retrieve the decl for TensorFlow.TensorDataType iff the TensorFlow module
+  /// has been imported.  Otherwise, this returns null.
+  StructDecl *getTensorDataTypeDecl() const;
+
+  /// Retrieve the type for Swift._AutoDiffTape.
+  CanType getAutoDiffTapeType() const;
 
   /// Retrieve the type Swift.Never.
   CanType getNeverType() const;
@@ -935,6 +953,14 @@ public:
   bool isSwiftVersionAtLeast(unsigned major, unsigned minor = 0) const {
     return LangOpts.isSwiftVersionAtLeast(major, minor);
   }
+
+  // SWIFT_ENABLE_TENSORFLOW
+  /// Determine whether the given type is differentiable.
+  bool isDifferentiable(CanType type, ModuleDecl *module);
+
+  /// Compute the tangent space of this manifold, if the given type represents a
+  /// differentiable manifold.
+  Optional<TangentSpace> getTangentSpace(CanType type, ModuleDecl *module);
 
 private:
   friend Decl;

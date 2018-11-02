@@ -28,6 +28,8 @@
 #include "swift/SIL/MemAccessUtils.h"
 #include "swift/SIL/PostOrder.h"
 #include "swift/SIL/PrettyStackTrace.h"
+// SWIFT_ENABLE_TENSORFLOW
+#include "swift/SIL/SILConstants.h"
 #include "swift/SIL/SILDebugScope.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILModule.h"
@@ -60,9 +62,16 @@ static llvm::cl::opt<bool> AbortOnFailure(
                               "verify-abort-on-failure",
                               llvm::cl::init(true));
 
+// SWIFT_ENABLE_TENSORFLOW
+// This flag is temporarily set to false because debug scope verification does
+// not handle inlined call sites. This is problematic for deabstraction, which
+// does performance inlining at -Onone.
+// When debug scope verification handles inlined call sites, set this flag to
+// true.
+// Documented at SR-8114.
 static llvm::cl::opt<bool> VerifyDIHoles(
                               "verify-di-holes",
-                              llvm::cl::init(true));
+                              llvm::cl::init(false));
 
 static llvm::cl::opt<bool> SkipConvertEscapeToNoescapeAttributes(
     "verify-skip-convert-escape-to-noescape-attributes", llvm::cl::init(false));
@@ -1221,6 +1230,29 @@ public:
             "operand of end_apply must be a begin_apply");
   }
 
+  /// SWIFT_ENABLE_TENSORFLOW
+  void checkGradientInst(GradientInst *GI) {
+    CanSILFunctionType origFnTy = GI->getOriginalType();
+    require(origFnTy, "Original function value must have function type");
+    auto config = GI->getConfig();
+    require(config.getSourceIndex() < origFnTy->getNumResults(),
+            "Differentiation source index out of bounds");
+    llvm::SmallBitVector paramIndices = config.getParameterIndices();
+    require(!config.getParameterIndices().empty(),
+            "Parameter indices cannot be empty; they must be explicitly "
+            "specified");
+    // Verify differentiation parameters.
+    int lastIndex = -1;
+    for (auto index : paramIndices.set_bits()) {
+      require((int)index > lastIndex, "Parameter indices must be ascending");
+      auto paramTy = origFnTy->getParameters()[index].getType();
+      require(!(paramTy.isAnyClassReferenceType() ||
+                paramTy.isAnyExistentialType()),
+              "Cannot differentiate with respect to reference type or "
+              "existential type");
+    }
+  }
+
   void verifyLLVMIntrinsic(BuiltinInst *BI, llvm::Intrinsic::ID ID) {
     // Certain llvm intrinsic require constant values as their operands.
     // Consequently, these must not be phi nodes (aka. basic block arguments).
@@ -1385,12 +1417,92 @@ public:
     }
   }
 
+  // SWIFT_ENABLE_TENSORFLOW
+  static bool isAutoDiffBuiltinInst(BuiltinInst *BI) {
+    auto id = BI->getBuiltinInfo().ID;
+    return id == BuiltinValueKind::AutoDiffCreateTape ||
+      id == BuiltinValueKind::AutoDiffDestroyTape ||
+      id == BuiltinValueKind::AutoDiffPushToTape ||
+      id == BuiltinValueKind::AutoDiffPopFromTape;
+  }
+
+  // SWIFT_ENABLE_TENSORFLOW
+  void checkAutoDiffBuiltinInst(BuiltinInst *BI) {
+    auto &ctx = M->getASTContext();
+    auto id = BI->getBuiltinInfo().ID;
+    require(BI->getSubstitutions().getReplacementTypes().size() == 1,
+            "autodiff builtin should have a single type parameter");
+
+    auto name = getBuiltinName(id);
+    auto resultErrorMsg = "unexpected result type for '" + name + "'";
+    auto operandErrorMsg = "unexpected operand type for '" + name + "'";
+
+    auto canGenericParam = BI->getSubstitutions().getReplacementTypes()[0]
+      ->getCanonicalType();
+    auto tapeType = SILType::getPrimitiveObjectType(
+      BoundGenericType::get(ctx.get_AutoDiffTapeDecl(), Type(), canGenericParam)
+        ->getCanonicalType());
+    if (id == BuiltinValueKind::AutoDiffCreateTape) {
+      require(BI->getNumOperands() == 0,
+              "'" + name + "' should have no arguments");
+      requireSameType(BI->getType(), tapeType, resultErrorMsg);
+      return;
+    }
+
+    auto voidType = SILType::getPrimitiveObjectType(TupleType::getEmpty(ctx));
+    if (id == BuiltinValueKind::AutoDiffDestroyTape) {
+      require(BI->getNumOperands() == 1,
+              "'" + name + "' should have one argument");
+      requireSameType(BI->getType(), voidType, resultErrorMsg);
+      requireSameType(BI->getOperand(0)->getType(), tapeType, operandErrorMsg);
+      return;
+    }
+
+    auto genericParam = SILType::getPrimitiveObjectType(canGenericParam);
+    auto wordType = SILType::getPrimitiveObjectType(
+      BuiltinIntegerType::getWordType(ctx)->getCanonicalType());
+    if (id == BuiltinValueKind::AutoDiffPushToTape) {
+      require(BI->getNumOperands() == 3,
+              "'" + name + "' should have three arguments");
+      requireSameType(BI->getType(), voidType, resultErrorMsg);
+      requireSameType(BI->getOperand(0)->getType(), tapeType, operandErrorMsg);
+      requireSameType(BI->getOperand(1)->getType(), genericParam,
+                      operandErrorMsg);
+      requireSameType(BI->getOperand(2)->getType(), wordType, operandErrorMsg);
+      return;
+    }
+    if (id == BuiltinValueKind::AutoDiffPopFromTape) {
+      require(BI->getNumOperands() == 2,
+              "'" + name + "' should have two arguments");
+      requireSameType(BI->getType(), genericParam, resultErrorMsg);
+      requireSameType(BI->getOperand(0)->getType(), tapeType, operandErrorMsg);
+      requireSameType(BI->getOperand(1)->getType(), wordType, operandErrorMsg);
+      return;
+    }
+  }
+
+
   void checkBuiltinInst(BuiltinInst *BI) {
     // Check for special constraints on llvm intrinsics.
     if (BI->getIntrinsicInfo().ID != llvm::Intrinsic::not_intrinsic)
       verifyLLVMIntrinsic(BI, BI->getIntrinsicInfo().ID);
+
+    // SWIFT_ENABLE_TENSORFLOW
+    // Verify autodiff builtins.
+    if (isAutoDiffBuiltinInst(BI))
+      checkAutoDiffBuiltinInst(BI);
   }
-  
+
+  // SWIFT_ENABLE_TENSORFLOW
+  void checkGraphOperationInst(GraphOperationInst *GI) {
+    llvm::DenseSet<Identifier> attributeNames;
+    for (auto attr : GI->getAttributes()) {
+      require(attributeNames.insert(attr.name).second,
+              "Duplicate attribute name '" + attr.name.str() + "'");
+      require(attr.value.isConstant(), "Invalid graph operation attribute");
+    }
+  }
+
   void checkFunctionRefInst(FunctionRefInst *FRI) {
     auto fnType = requireObjectType(SILFunctionType, FRI,
                                     "result of function_ref");
@@ -4425,6 +4537,30 @@ public:
             "have at least one argument for self.");
   }
 
+  /// SWIFT_ENABLE_TENSORFLOW
+  /// Verify the [reverse_differentiable] attribute.
+  void verifyReverseDifferentiableAttr(SILFunction *F,
+                                       SILReverseDifferentiableAttr &Attr) {
+    // Parameter indices must be specified.
+    require(!Attr.getIndices().parameters.empty(),
+            "Parameter indices cannot be empty");
+    // Verify if specified parameter indices are valid.
+    auto numParams = F->getLoweredFunctionType()->getNumParameters();
+    int lastIndex = -1;
+    for (auto paramIdx : Attr.getIndices().parameters.set_bits()) {
+      require(paramIdx < numParams, "Parameter index out of bounds.");
+      auto currentIdx = (int)paramIdx;
+      require(currentIdx > lastIndex, "Parameter indices not ascending.");
+      lastIndex = currentIdx;
+    }
+    // TODO: Verify if the specified primal/adjoint function has the right
+    // signature. SIL function verification runs right after a function is
+    // parsed.
+    // However, the adjoint function may come after the this function. Without
+    // changing the compiler too much, is there a way to verify this at a module
+    // level, after everything is parsed?
+  }
+
   /// Verify the various control-flow-sensitive rules of SIL:
   ///
   /// - stack allocations and deallocations must obey a stack discipline
@@ -4780,6 +4916,10 @@ public:
 
     CanSILFunctionType FTy = F->getLoweredFunctionType();
     verifySILFunctionType(FTy);
+
+    // SWIFT_ENABLE_TENSORFLOW
+    for (auto *RDiffAttr : F->getReverseDifferentiableAttrs())
+      verifyReverseDifferentiableAttr(F, *RDiffAttr);
 
     if (F->isExternalDeclaration()) {
       if (F->hasForeignBody())

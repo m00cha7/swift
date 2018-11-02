@@ -948,6 +948,8 @@ namespace {
         metadataConvention = FunctionMetadataConvention::Swift;
         isEscaping = !type->isNoEscape();
         break;
+      // SWIFT_ENABLE_TENSORFLOW
+      case FunctionTypeRepresentation::TensorFlow:
       case FunctionTypeRepresentation::Thin:
         metadataConvention = FunctionMetadataConvention::Thin;
         break;
@@ -958,13 +960,38 @@ namespace {
         metadataConvention = FunctionMetadataConvention::CFunctionPointer;
         break;
       }
+      
+      // SWIFT_ENABLE_TENSORFLOW
+      FunctionMetadataDifferentiability metadataDiffability;
+      switch (type->getDifferentiability()) {
+      case FunctionTypeDifferentiability::None:
+        metadataDiffability = FunctionMetadataDifferentiability::None;
+        break;
+      case FunctionTypeDifferentiability::Forward:
+        metadataDiffability = FunctionMetadataDifferentiability::Forward;
+        break;
+      case FunctionTypeDifferentiability::Reverse:
+        metadataDiffability = FunctionMetadataDifferentiability::Reverse;
+        break;
+      case FunctionTypeDifferentiability::Bidirectional:
+        metadataDiffability = FunctionMetadataDifferentiability::Bidirectional;
+        break;
+      case FunctionTypeDifferentiability::Linear:
+        metadataDiffability = FunctionMetadataDifferentiability::Linear;
+        break;
+      case FunctionTypeDifferentiability::Constant:
+        metadataDiffability = FunctionMetadataDifferentiability::Constant;
+        break;
+      }
 
       auto flagsVal = FunctionTypeFlags()
                           .withNumParameters(numParams)
                           .withConvention(metadataConvention)
                           .withThrows(type->throws())
                           .withParameterFlags(hasFlags)
-                          .withEscaping(isEscaping);
+                          // SWIFT_ENABLE_TENSORFLOW
+                          .withEscaping(isEscaping)
+                          .withDifferentiability(metadataDiffability);
 
       auto flags = llvm::ConstantInt::get(IGF.IGM.SizeTy,
                                           flagsVal.getIntValue());
@@ -1949,6 +1976,9 @@ namespace {
       case SILFunctionType::Representation::ObjCMethod:
       case SILFunctionType::Representation::CFunctionPointer:
       case SILFunctionType::Representation::Closure:
+      // SWIFT_ENABLE_TENSORFLOW
+      case SILFunctionType::Representation::TensorFlow:
+
         // A thin function looks like a plain pointer.
         // FIXME: Except for extra inhabitants?
         return emitDirectMetadataRef(C.TheRawPointerType, request);
@@ -2160,6 +2190,9 @@ namespace {
       case SILFunctionType::Representation::ObjCMethod:
       case SILFunctionType::Representation::CFunctionPointer:
       case SILFunctionType::Representation::Closure:
+      // SWIFT_ENABLE_TENSORFLOW
+        case SILFunctionType::Representation::TensorFlow:
+
         // A thin function looks like a plain pointer.
         // FIXME: Except for extra inhabitants?
         return emitFromValueWitnessTable(C.TheRawPointerType);

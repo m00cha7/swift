@@ -13,6 +13,10 @@ ios: CloudKit.swiftinterface
 tvos: CloudKit.swiftinterface
 watchos: CloudKit.swiftinterface
 
+// SWIFT_ENABLE_TENSORFLOW
+linux-gnu: TensorFlow.swiftinterface
+macosx: TensorFlow.swiftinterface
+
 // Needs to be built as Swift 4.2.
 ios: UIKit.swiftinterface
 tvos: UIKit.swiftinterface

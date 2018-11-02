@@ -216,6 +216,63 @@ WARNING(designated_init_in_cross_module_extension,none,
 NOTE(designated_init_c_struct_fix,none,
      "use \"self.init()\" to initialize the struct with zero values", ())
 
+NOTE(constexpr_unknown_reason, none, "%0", (StringRef))
+NOTE(constexpr_called_from, none, "when called from here", ())
+NOTE(constexpr_not_evaluable, none,
+     "expression not evaluable as constant here", ())
+
+// SWIFT_ENABLE_TENSORFLOW
+// TensorFlow Support Diagnostics.
+ERROR(tf_internal_error, none,
+      "internal error: %0", (StringRef))
+ERROR(tfop_invalid_tfop, none,
+      "#tfop invalid: %0", (StringRef))
+ERROR(tfop_incorrect_definition, none,
+      "tfop function doesn't align with TensorFlow op definition:\n%0",
+      (StringRef))
+ERROR(tfop_value_no_send_receive, none,
+      "value cannot be used by non-TensorFlow API", ())
+ERROR(tf_multiple_device, none,
+      "device configuration specified multiple times", ())
+NOTE(tf_multiple_device_prev, none,
+      "previous configuration is specified here", ())
+ERROR(tf_lowering_error, none,
+      "internal error generating TensorFlow graph:\n%0", (StringRef))
+ERROR(tf_lowering_unknown_op, none,
+      "op named '%0' is not registered in TensorFlow", (StringRef))
+ERROR(tf_convention_tf_host_code_not_allowed, none,
+      "host code is not allowed in a TensorFlow function", ())
+ERROR(tf_no_captures_in_tf_functions, none,
+      "TensorFlow functions cannot capture values", ())
+
+WARNING(tf_value_implicitly_copied_to_accel, none,
+        "%0 implicitly copied to the accelerator, use .toAccelerator() to make "
+        "transfer explicit",
+        (StringRef))
+WARNING(tf_value_implicitly_copied_to_accel_always, none,
+        "%0 always cause a copy to the accelerator, use .toAccelerator() to make "
+        "transfer explicit",
+        (StringRef))
+
+WARNING(tf_value_implicitly_copied_to_host, none,
+        "value implicitly copied to the host, use .toHost() to make "
+        "transfer explicit",
+        ())
+
+NOTE(tf_value_used_here, none,
+     "value used here", ())
+ERROR(tf_op_misuse, none,
+      "%0", (StringRef))
+NOTE(tf_op_misuse_note, none,
+     "%0", (StringRef))
+
+ERROR(tf_op_result_generic,none,
+      "cannot extract TensorFlow result into type %0, because %0 contains "
+      "unbound generic parameters", (Type))
+ERROR(tf_op_result_not_value_or_aggregate,none,
+      "cannot extract TensorFlow result into type %0, because %0 is not a "
+      "TensorFlow value type or an aggregate of TensorFlow value types",
+      (Type))
 
 // Control flow diagnostics.
 ERROR(missing_return,none,
@@ -297,6 +354,40 @@ ERROR(shifting_all_significant_bits,none,
 // staticReport diagnostics.
 ERROR(static_report_error, none,
       "static report error", ())
+
+// SWIFT_ENABLE_TENSORFLOW
+ERROR(pound_assert_condition_not_constant,none,
+       "#assert condition not constant", ())
+ERROR(pound_assert_failure,none,
+       "%0", (StringRef))
+
+// Automatic differentiation diagnostics
+ERROR(autodiff_internal_swift_not_imported,none,
+      "AD internal error: the Swift module is not imported", ())
+ERROR(autodiff_incomplete_differentiable_attr,none,
+      "incomplete `reverse_differentiable` attribute; it should specify either "
+      "both primal and adjoint or nothing", ())
+ERROR(autodiff_opaque_function_unsupported,none,
+      "differentiating an opaque function is not supported yet", ())
+ERROR(autodiff_cannot_synthesize_primal_yet,none,
+      "automatic differentiation cannot synthesize primals yet; define the "
+      "primal function using a '@differentiable' attribute", ())
+ERROR(autodiff_unsupported_type,none,
+      "differentiating '%0' is not supported yet", (Type))
+ERROR(autodiff_function_not_differentiable,none,
+      "function is not differentiable", ())
+NOTE(autodiff_value_defined_here,none,
+     "value defined here", ())
+NOTE(autodiff_when_differentiating_function_call,none,
+     "when differentiating this function call", ())
+NOTE(autodiff_expression_is_not_differentiable,none,
+     "expression is not differentiable", ())
+NOTE(autodiff_nested_function_call_multiple_return_active,none,
+     "function call is being differentiated from multiple return values", ())
+NOTE(autodiff_control_flow_not_supported,none,
+     "differentiating control flow is not supported yet", ())
+NOTE(autodiff_nested_not_supported,none,
+     "nested differentiation is not supported yet", ())
 
 ERROR(non_physical_addressof,none,
       "addressof only works with purely physical lvalues; "

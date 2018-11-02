@@ -170,6 +170,16 @@ void constraints::simplifyLocator(Expr *&anchor,
         continue;
       }
 
+      // SWIFT_ENABLE_TENSORFLOW
+      if (auto *poundAssertExpr = dyn_cast<PoundAssertExpr>(anchor)) {
+        targetAnchor = nullptr;
+        targetPath.clear();
+
+        anchor = poundAssertExpr->getCondition();
+        path = path.slice(1);
+        continue;
+      }
+
       if (auto *UME = dyn_cast<UnresolvedMemberExpr>(anchor)) {
         // The target anchor is the method being called,
         // no additional information could be retrieved
@@ -547,6 +557,9 @@ private:
 
   bool diagnoseSubscriptErrors(SubscriptExpr *SE, bool performingSet);
 
+  // SWIFT_ENABLE_TENSORFLOW
+  bool diagnoseReverseAutoDiffExpr(ReverseAutoDiffExpr *GE);
+
   /// Diagnose the usage of 'subscript' instead of the operator when calling
   /// a subscript and offer a fixit if the inputs are compatible.
   bool diagnoseSubscriptMisuse(ApplyExpr *callExpr);
@@ -583,6 +596,9 @@ private:
   bool visitCaptureListExpr(CaptureListExpr *CLE);
   bool visitClosureExpr(ClosureExpr *CE);
   bool visitKeyPathExpr(KeyPathExpr *KPE);
+  // SWIFT_ENABLE_TENSORFLOW
+  bool visitReverseAutoDiffExpr(ReverseAutoDiffExpr *RADE);
+  bool visitPoundAssertExpr(PoundAssertExpr *PAE);
 };
 } // end anonymous namespace
 
@@ -5355,7 +5371,9 @@ bool FailureDiagnosis::visitApplyExpr(ApplyExpr *callExpr) {
   // If we resolved a concrete expression for the callee, and it has
   // non-function/non-metatype type, then we cannot call it!
   if (!isUnresolvedOrTypeVarType(fnType) &&
-      !fnType->is<AnyFunctionType>() && !fnType->is<MetatypeType>()) {
+      !fnType->is<AnyFunctionType>() && !fnType->is<MetatypeType>()
+      // SWIFT_ENABLE_TENSORFLOW
+      && !CS.DynamicCallableCache[fnType->getCanonicalType()].isValid()) {
     
     auto arg = callExpr->getArg();
 
@@ -6924,6 +6942,40 @@ bool FailureDiagnosis::visitKeyPathExpr(KeyPathExpr *KPE) {
   return diagnoseKeyPathComponents(CS, KPE, rootType);
 }
 
+// SWIFT_ENABLE_TENSORFLOW
+bool FailureDiagnosis::
+diagnoseReverseAutoDiffExpr(ReverseAutoDiffExpr *RADE) {
+  // TODO: Sema diagnostics for gradient expressions could be improved by
+  // diagnosing non-differentiable arguments/non-differentiable constraints.
+  auto gradType = CS.getType(RADE);
+  auto gradFnType = gradType->getAs<AnyFunctionType>();
+  assert(gradFnType && "Gradient expression should have function type.");
+
+  // If there is no contextual type, there is no way to diagnose further.
+  auto contextualType = CS.getContextualType();
+  if (!contextualType) return false;
+
+  // If gradient expression has a generic primal, then conversion to the
+  // contextual type was not possible.
+  if (gradType->hasTypeVariable()) {
+    diagnose(RADE->getLoc(), diag::gradient_expr_incompatible_contextual_type,
+             contextualType);
+    return true;
+  }
+
+  return false;
+}
+
+bool FailureDiagnosis::visitReverseAutoDiffExpr(ReverseAutoDiffExpr *RADE) {
+  return diagnoseReverseAutoDiffExpr(RADE);
+}
+
+bool FailureDiagnosis::visitPoundAssertExpr(PoundAssertExpr *PAE) {
+  auto boolType = CS.getASTContext().getBoolDecl()->getDeclaredType();
+  return !typeCheckChildIndependently(PAE->getCondition(), boolType,
+                                      CTP_CallArgument);
+}
+
 bool FailureDiagnosis::visitArrayExpr(ArrayExpr *E) {
   // If we had a contextual type, then it either conforms to
   // ExpressibleByArrayLiteral or it is an invalid contextual type.
@@ -7082,6 +7134,11 @@ bool FailureDiagnosis::visitDictionaryExpr(DictionaryExpr *E) {
 /// the target.
 bool FailureDiagnosis::visitObjectLiteralExpr(ObjectLiteralExpr *E) {
   auto &TC = CS.getTypeChecker();
+
+  // SWIFT_ENABLE_TENSORFLOW
+  // TensorFlow ops don't act like other literals.
+  if (E->isTFOp())
+    return false;
 
   // Type check the argument first.
   auto protocol = TC.getLiteralProtocol(E);

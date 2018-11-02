@@ -908,6 +908,20 @@ struct MemberLookupResult {
 };
   
   
+// SWIFT_ENABLE_TENSORFLOW
+/// \brief Stores the required methods for @dynamicCallable types.
+struct DynamicCallableMethods {
+  FuncDecl *argumentsMethod = nullptr;
+  FuncDecl *keywordArgumentsMethod = nullptr;
+
+  /// \brief Returns true if type defines either of the @dynamicCallable
+  /// required methods. Returns false iff type does not satisfy @dynamicCallable
+  /// requirements.
+  bool isValid() const {
+    return argumentsMethod || keywordArgumentsMethod;
+  }
+};
+
 /// \brief Describes a system of constraints on type variables, the
 /// solution of which assigns concrete types to each of the type variables.
 /// Constraint systems are typically generated given an (untyped) expression.
@@ -1060,6 +1074,11 @@ private:
 public:
   /// The locators of \c Defaultable constraints whose defaults were used.
   SmallVector<ConstraintLocator *, 8> DefaultedConstraints;
+
+  // SWIFT_ENABLE_TENSORFLOW
+  /// A cache that stores the @dynamicCallable required methods implemented by
+  /// types.
+  llvm::DenseMap<CanType, DynamicCallableMethods> DynamicCallableCache;
 
   /// This is a cache that keeps track of whether a given type is known (or not)
   /// to be a @dynamicMemberLookup type.

@@ -1,3 +1,7 @@
+if(SWIFT_ENABLE_TENSORFLOW)
+  find_package(TensorFlow REQUIRED)
+  include_directories(BEFORE "${TF_INCLUDE_DIR}")
+endif()
 
 set(SILOPTIMIZER_SOURCES)
 
@@ -35,4 +39,5 @@ add_subdirectory(Utils)
 
 add_swift_library(swiftSILOptimizer STATIC
   ${SILOPTIMIZER_SOURCES}
-  LINK_LIBRARIES swiftSIL)
+  LINK_LIBRARIES swiftSIL
+  INTERFACE_LINK_LIBRARIES "${TF_LIBRARIES}")

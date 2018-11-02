@@ -98,6 +98,58 @@ private:
   }
 };
 
+/// SWIFT_ENABLE_TENSORFLOW
+/// Reverse-mode differentiable attribute - @differentiable attribute lowered to
+/// SIL. This attribute is used by the automatic differentiation pass to find
+/// the defined adjoint of a function.
+///
+/// The attribute can be specified to one of the following levels, and the rest
+/// will be synthesized by the compiler.
+/// - Just adjoint
+/// - Primal and adjoint
+///
+/// Example:
+///   sil [reverse_differentiable primal @foo_primal adjoint @foo_adjoint] @foo
+///     : $(Float) -> Float { ... }
+class SILReverseDifferentiableAttr final {
+  friend SILFunction;
+
+private:
+  /// The AD indices.
+  SILReverseAutoDiffIndices indices;
+  /// The primal and adjoint function names.
+  StringRef PrimalName, AdjointName;
+  /// Whether the adjoint is primitive.
+  bool AdjointIsPrimitive;
+
+  SILReverseDifferentiableAttr(const SILReverseAutoDiffIndices &indices,
+                               StringRef primalName,
+                               StringRef adjointName,
+                               bool adjointIsPrimitive);
+
+public:
+  static SILReverseDifferentiableAttr *create(
+      SILModule &M, const SILReverseAutoDiffIndices &indices,
+      StringRef primalName = StringRef(), StringRef adjointName = StringRef(),
+      bool adjointIsPrimitive = false);
+
+  bool hasPrimal() const { return !PrimalName.empty(); }
+  StringRef getPrimalName() const { assert(hasPrimal()); return PrimalName; }
+  void setPrimalName(StringRef name) { PrimalName = name; }
+
+  bool hasAdjoint() const { return !AdjointName.empty(); }
+  bool isAdjointPrimitive() const { return AdjointIsPrimitive; }
+  StringRef getAdjointName() const { assert(hasAdjoint()); return AdjointName; }
+  void setAdjointName(StringRef name, bool primitive) {
+    AdjointName = name;
+    AdjointIsPrimitive = primitive;
+  }
+
+  const SILReverseAutoDiffIndices &getIndices() const { return indices; }
+
+  void print(llvm::raw_ostream &OS) const;
+};
+
 /// SILFunction - A function body that has been lowered to SIL. This consists of
 /// zero or more SIL SILBasicBlock objects that contain the SILInstruction
 /// objects making up the function.
@@ -198,6 +250,11 @@ private:
 
   /// The function's remaining set of specialize attributes.
   std::vector<SILSpecializeAttr*> SpecializeAttrSet;
+
+  /// SWIFT_ENABLE_TENSORFLOW
+  /// The function's `[reverse_differentiable]` attributes.
+  llvm::SmallVector<SILReverseDifferentiableAttr *, 4>
+    ReverseDifferentiableAttrs;
 
   /// The function's effects attribute.
   EffectsKind EffectsKindAttr;
@@ -570,6 +627,15 @@ public:
 
   void addSpecializeAttr(SILSpecializeAttr *Attr);
 
+  /// SWIFT_ENABLE_TENSORFLOW
+  ArrayRef<SILReverseDifferentiableAttr *>
+  getReverseDifferentiableAttrs() const {
+    return ReverseDifferentiableAttrs;
+  }
+
+  void addReverseDifferentiableAttr(SILReverseDifferentiableAttr *attr) {
+    ReverseDifferentiableAttrs.push_back(attr);
+  }
 
   /// Get this function's optimization mode or OptimizationMode::NotSet if it is
   /// not set for this specific function.

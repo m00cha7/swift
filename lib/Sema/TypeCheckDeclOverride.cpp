@@ -1169,6 +1169,8 @@ namespace  {
     UNINTERESTING_ATTR(CDecl)
     UNINTERESTING_ATTR(Consuming)
     UNINTERESTING_ATTR(Dynamic)
+    // SWIFT_ENABLE_TENSORFLOW
+    UNINTERESTING_ATTR(DynamicCallable)
     UNINTERESTING_ATTR(DynamicMemberLookup)
     UNINTERESTING_ATTR(SILGenName)
     UNINTERESTING_ATTR(Exported)
@@ -1210,6 +1212,12 @@ namespace  {
     UNINTERESTING_ATTR(SwiftNativeObjCRuntimeBase)
     UNINTERESTING_ATTR(ShowInInterface)
     UNINTERESTING_ATTR(Specialize)
+
+    // SWIFT_ENABLE_TENSORFLOW
+    UNINTERESTING_ATTR(Differentiable)
+    UNINTERESTING_ATTR(CompilerEvaluable)
+    UNINTERESTING_ATTR(TensorFlowGraph)
+    UNINTERESTING_ATTR(TFParameter)
 
     // These can't appear on overridable declarations.
     UNINTERESTING_ATTR(Prefix)

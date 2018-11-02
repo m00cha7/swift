@@ -23,6 +23,8 @@
 #include "swift/SIL/Projection.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILCloner.h"
+// SWIFT_ENABLE_TENSORFLOW
+#include "swift/SIL/SILConstants.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/SILVisitor.h"
@@ -575,6 +577,36 @@ TryApplyInst *TryApplyInst::create(
   return ::new (buffer) TryApplyInst(loc, callee, substCalleeTy, subs, args,
                                      typeDependentOperands,
                                      normalBB, errorBB, specializationInfo);
+}
+
+/// SWIFT_ENABLE_TENSORFLOW
+GradientInst::GradientInst(SILModule &module, SILDebugLocation debugLoc,
+                           SILValue original,
+                           const SILReverseAutoDiffConfig &config)
+  : InstructionBase(debugLoc,
+                    getGradientSILType(module, original, config)),
+    Config(config), Operands(this, original) {}
+
+SILType GradientInst::getGradientSILType(
+    SILModule &module, SILValue original,
+    const SILReverseAutoDiffConfig &config) {
+  // If parameter indices are empty, return an invalid type (empty tuple type).
+  // An "empty parameter indices" will be produced during verification.
+  if (config.indices.parameters.none()) {
+    auto invalidTy = TupleType::get({}, module.getASTContext());
+    return SILType::getPrimitiveObjectType(CanType(invalidTy));
+  }
+  auto origFnTy = original->getType().castTo<SILFunctionType>();
+  auto gradFnTy = origFnTy->getGradientType(config, module);
+  return SILType::getPrimitiveObjectType(gradFnTy->getCanonicalType());
+}
+
+GradientInst *
+GradientInst::create(SILModule &M, SILDebugLocation debugLoc,
+                     SILValue original,
+                     const SILReverseAutoDiffConfig &config) {
+  void *buffer = M.allocateInst(sizeof(GradientInst), alignof(GradientInst));
+  return ::new (buffer) GradientInst(M, debugLoc, original, config);
 }
 
 FunctionRefInst::FunctionRefInst(SILDebugLocation Loc, SILFunction *F)
@@ -2390,3 +2422,60 @@ DestructureTupleInst *DestructureTupleInst::create(SILModule &M,
   return ::new (Buffer)
       DestructureTupleInst(M, Loc, Operand, Types, OwnershipKinds);
 }
+
+// SWIFT_ENABLE_TENSORFLOW
+GraphOperationInst::GraphOperationInst(
+    SILModule &M, SILDebugLocation loc, Identifier name,
+    ArrayRef<SILValue> arguments, ArrayRef<GraphOperationAttribute> attrs,
+    ArrayRef<SILType> resultTypes,
+    ArrayRef<ValueOwnershipKind> resultOwnerships) :
+  InstructionBase(loc),
+  MultipleValueInstructionTrailingObjects(this, resultTypes,
+                                          resultOwnerships),
+  Name(name), NumOperands(arguments.size())
+{
+  auto allOperands = getAllOperands();
+  for (unsigned i : indices(arguments))
+    new (&allOperands[i]) Operand(this, arguments[i]);
+  auto attrBuf = new GraphOperationAttribute[attrs.size()];
+  Attributes = MutableArrayRef<GraphOperationAttribute>(
+    static_cast<GraphOperationAttribute *>(attrBuf), attrs.size());
+  std::uninitialized_copy(attrs.begin(), attrs.end(), Attributes.data());
+}
+
+GraphOperationInst::~GraphOperationInst() {
+  for (auto &operand : getAllOperands())
+    operand.~Operand();
+  delete[] getAttributes().data();
+}
+
+GraphOperationInst *GraphOperationInst::create(
+    SILModule &M, SILDebugLocation loc, Identifier name,
+    ArrayRef<SILValue> arguments, ArrayRef<GraphOperationAttribute> attributes,
+    ArrayRef<SILType> resultTypes) {
+  llvm::SmallVector<ValueOwnershipKind, 4> resultOwnerships;
+  for (auto resultType : resultTypes) {
+    auto ownership = resultType.isTrivial(M)
+      ? ValueOwnershipKind::Trivial : ValueOwnershipKind::Owned;
+    resultOwnerships.push_back(ownership);
+  }
+
+  unsigned size =
+    totalSizeToAlloc<MultipleValueInstruction *, GraphOperationResult, Operand>(
+      1, resultTypes.size(), arguments.size());
+  void *buffer = M.allocateInst(size, alignof(GraphOperationInst));
+  return ::new (buffer) GraphOperationInst(M, loc, name, arguments, attributes,
+                                           resultTypes, resultOwnerships);
+}
+
+GraphOperationAttribute GraphOperationInst::getAttribute(unsigned i) const {
+  return getAttributes()[i];
+}
+
+
+Optional<SymbolicValue> GraphOperationInst::getAttributeNamed(StringRef name) {
+  for (auto attr : getAttributes())
+    if (attr.name.is(name))
+      return attr.value;
+  return None;
+};

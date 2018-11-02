@@ -75,6 +75,16 @@ enum class DeclTypeCheckingSemantics {
   /// The _openExistential(_:do:) declaration, which extracts the value inside
   /// an existential and passes it as a value of its own dynamic type.
   OpenExistential,
+
+  /// SWIFT_ENABLE_TENSORFLOW
+  /// The gradient(of:) declaration, which performs a reverse-mode automatic
+  /// differentiation and returns a function that computes the gradient.
+  GradientOf,
+
+  /// The valueAndGradient(of:) declaration, which performs a reverse-mode
+  /// automatic differentiation and returns a function that computes both the
+  /// original result value and the gradient.
+  ValueAndGradientOf,
 };
 
 /// The result of name lookup.
@@ -2092,6 +2102,9 @@ public:
   void checkInitializerErrorHandling(Initializer *I, Expr *E);
   void checkEnumElementErrorHandling(EnumElementDecl *D);
 
+  // SWIFT_ENABLE_TENSORFLOW
+  void checkFunctionBodyCompilerEvaluable(AbstractFunctionDecl *D);
+
   void addExprForDiagnosis(Expr *E1, Expr *Result) {
     DiagnosedExprs[E1] = Result;
   }
@@ -2146,6 +2159,21 @@ public:
   /// Check if the given decl has a @_semantics attribute that gives it
   /// special case type-checking behavior.
   DeclTypeCheckingSemantics getDeclTypeCheckingSemantics(ValueDecl *decl);
+
+  /// SWIFT_ENABLE_TENSORFLOW
+  // Returns the function declaration corresponding to the given function name
+  // and lookup context. If the function declaration cannot be resolved, emits a
+  // diagnostic and returns nullptr.
+  FuncDecl *lookupFuncDecl(
+      DeclName funcName, SourceLoc funcNameLoc, Type baseType,
+      DeclContext *lookupContext,
+      const std::function<bool(FuncDecl *)> &isValidFuncDecl,
+      const std::function<void()> &overloadDiagnostic,
+      const std::function<void()> &ambiguousDiagnostic,
+      const std::function<void()> &notFunctionDiagnostic,
+      NameLookupOptions lookupOptions = defaultMemberLookupOptions,
+      const Optional<std::function<bool(FuncDecl *)>> &hasValidTypeCtx = None,
+      const Optional<std::function<void()>> &invalidTypeCtxDiagnostic = None);
 };
 
 /// Temporary on-stack storage and unescaping for encoded diagnostic
@@ -2163,6 +2191,14 @@ public:
   /// The unescaped message to display to the user.
   const StringRef Message;
 };
+
+// SWIFT_ENABLE_TENSORFLOW
+/// Returns true if a method is an valid implementation of a @dynamicCallable
+/// attribute requirement. The method is given to be defined as one of the
+/// following: `dynamicallyCall(withArguments:)` or
+/// `dynamicallyCall(withKeywordArguments:)`.
+bool isValidDynamicCallableMethod(FuncDecl *funcDecl, DeclContext *DC,
+                                  TypeChecker &TC, bool hasKeywordArguments);
 
 /// Given a subscript defined as "subscript(dynamicMember:)->T", return true if
 /// it is an acceptable implementation of the @dynamicMemberLookup attribute's

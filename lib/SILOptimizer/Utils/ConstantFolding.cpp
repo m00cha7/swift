@@ -1672,6 +1672,7 @@ ConstantFolder::processWorkList() {
       UserV->replaceAllUsesWith(C);
 
       // The new constant could be further folded now, add it to the worklist.
+      // SWIFT_ENABLE_TENSORFLOW
       if (auto *Inst = C->getDefiningInstruction())
         if (isa<SingleValueInstruction>(Inst))
           WorkList.insert(Inst);

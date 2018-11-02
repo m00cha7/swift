@@ -98,6 +98,109 @@ CanType SILFunctionType::getSelfInstanceType() const {
   return selfTy;
 }
 
+/// SWIFT_ENABLE_TENSORFLOW
+CanSILFunctionType
+SILFunctionType::getGradientType(
+    const SILReverseAutoDiffConfig &config, SILModule &M) {
+  // FIXME: Handle `Delayed` gradient option.
+  auto originalParams = getParameters();
+  auto originalResult = getResults()[config.getSourceIndex()];
+  auto originalSourceResultTy = originalResult.getType();
+  llvm::SmallBitVector paramIndices = config.getParameterIndices();
+  SmallVector<SILParameterInfo, 4> gradParams;
+  SmallVector<SILResultInfo, 4> gradResults;
+  // Collect original parameters to gradient parameters. They have the same
+  // convention.
+  for (auto &originalParam : originalParams)
+    gradParams.push_back(originalParam);
+  // If seedable, add original result to the parameter list.
+  if (config.isSeedable()) {
+    ParameterConvention seedConv;
+    switch (originalResult.getConvention()) {
+    case ResultConvention::Indirect:
+      seedConv = ParameterConvention::Indirect_In_Guaranteed; break;
+    case ResultConvention::Unowned:
+      seedConv = ParameterConvention::Direct_Unowned; break;
+    case ResultConvention::Owned:
+      seedConv = ParameterConvention::Direct_Owned; break;
+    case ResultConvention::Autoreleased:
+      seedConv = ParameterConvention::Direct_Guaranteed; break;
+    case ResultConvention::UnownedInnerPointer:
+      seedConv = ParameterConvention::Indirect_In_Guaranteed; break;
+    }
+    gradParams.push_back({originalSourceResultTy, seedConv});
+  }
+  // If no differentiation parameters are specified, differentiation is with
+  // respect to all of original's parameters. For simplicity, we add all
+  // parameter indices to a temporary.
+  if (paramIndices.none()) {
+    paramIndices.resize(getNumParameters());
+    paramIndices.set();
+  }
+  // If preserving result, the original result will be the first result.
+  if (config.isPreservingResult())
+    gradResults.push_back(originalResult);
+  // Collect differentiation parameters to gradient results.
+  for (auto index : paramIndices.set_bits()) {
+    auto param = originalParams[index];
+    ResultConvention conv;
+    switch (param.getConvention()) {
+    case ParameterConvention::Direct_Owned:
+      conv = ResultConvention::Owned; break;
+    case ParameterConvention::Direct_Unowned:
+      conv = ResultConvention::Unowned; break;
+    case ParameterConvention::Direct_Guaranteed:
+      conv = ResultConvention::Owned; break;
+    case ParameterConvention::Indirect_In:
+    case ParameterConvention::Indirect_Inout:
+    case ParameterConvention::Indirect_InoutAliasable:
+    case ParameterConvention::Indirect_In_Constant:
+    case ParameterConvention::Indirect_In_Guaranteed:
+      conv = ResultConvention::Indirect; break;
+    }
+    gradResults.push_back({ param.getType(), conv });
+  }
+  // If the gradient is delayed, the result type is
+  //   (original_params...) -> (original_result?, (seed?) -> (derivatives...))
+  if (config.isDelayed()) {
+    // The delayed gradient function (inner) type.
+    ArrayRef<SILParameterInfo> delayedGradParams = config.isSeedable()
+      ? ArrayRef<SILParameterInfo>(&gradParams.back(), 1)
+      : ArrayRef<SILParameterInfo>();
+    ArrayRef<SILResultInfo> delayedGradResults = config.isPreservingResult()
+      ? ArrayRef<SILResultInfo>(gradResults).drop_front()
+      : ArrayRef<SILResultInfo>(gradResults);
+    auto delayedGradFuncTy = SILFunctionType::get(
+      getGenericSignature(),
+      getExtInfo().withRepresentation(Representation::Thin),
+      getCoroutineKind(), getCalleeConvention(),
+      delayedGradParams, {}, delayedGradResults, None,
+      getASTContext(), getWitnessMethodConformanceOrNone());
+    ArrayRef<SILParameterInfo> params = config.isSeedable()
+      ? ArrayRef<SILParameterInfo>(gradParams).drop_back()
+      : ArrayRef<SILParameterInfo>(gradParams);
+    SILResultInfo delayedGradFuncResult(
+      delayedGradFuncTy, ResultConvention::Unowned);
+    SmallVector<SILResultInfo, 2> results;
+    if (config.isPreservingResult())
+      results.append({gradResults.front(), delayedGradFuncResult});
+    else
+      results.append({delayedGradFuncResult});
+    // $convention(thin) (seed?) -> (derivatives...)
+    return SILFunctionType::get(getGenericSignature(), getExtInfo(),
+                                getCoroutineKind(), getCalleeConvention(),
+                                params, getYields(), results,
+                                getOptionalErrorResult(), getASTContext(),
+                                None);
+  }
+  // Create an expected function type for the non-delayed case.
+  return SILFunctionType::get(getGenericSignature(), getExtInfo(),
+                              getCoroutineKind(), getCalleeConvention(),
+                              gradParams, getYields(), gradResults,
+                              getOptionalErrorResult(), getASTContext(),
+                              getWitnessMethodConformanceOrNone());
+}
+
 ProtocolDecl *
 SILFunctionType::getDefaultWitnessMethodProtocol() const {
   assert(getRepresentation() == SILFunctionTypeRepresentation::WitnessMethod);
@@ -1260,6 +1363,8 @@ static CanSILFunctionType getNativeSILFunctionType(
                                                   substInterfaceType,
                                                   extInfo, constant);
 
+  // SWIFT_ENABLE_TENSORFLOW
+  case SILFunctionType::Representation::TensorFlow:
   case SILFunctionType::Representation::Thin:
   case SILFunctionType::Representation::ObjCMethod:
   case SILFunctionType::Representation::Thick:
@@ -2031,6 +2136,20 @@ TypeConverter::getDeclRefRepresentation(SILDeclRef c) {
     return SILFunctionTypeRepresentation::CFunctionPointer;
   }
 
+  // SWIFT_ENABLE_TENSORFLOW
+  if (c.hasClosureExpr()) {
+    // If closure was initialized with a TensorFlow convention, Sema would have
+    // propagated that to the closure expr. Return the tensorflow representation
+    // in that case. Note that this is analogous to the Func case below.
+    if (auto *closureType =
+            c.getClosureExpr()->getType()->getAs<AnyFunctionType>()) {
+      if (closureType->getExtInfo().getSILRepresentation() ==
+          SILFunctionTypeRepresentation::TensorFlow) {
+        return SILFunctionTypeRepresentation::TensorFlow;
+      }
+    }
+  }
+
   // Anonymous functions currently always have Freestanding CC.
   if (!c.hasDecl())
     return SILFunctionTypeRepresentation::Thin;
@@ -2056,6 +2175,13 @@ TypeConverter::getDeclRefRepresentation(SILDeclRef c) {
     case SILDeclRef::Kind::Func:
       if (c.getDecl()->getDeclContext()->isTypeContext())
         return SILFunctionTypeRepresentation::Method;
+      // SWIFT_ENABLE_TENSORFLOW
+      if (auto *FD = dyn_cast<FuncDecl>(c.getDecl())) {
+        auto *fnTy = FD->getInterfaceType()->castTo<AnyFunctionType>();
+        if (fnTy->getExtInfo().getRepresentation() ==
+              AnyFunctionType::Representation::TensorFlow)
+          return SILFunctionTypeRepresentation::TensorFlow;
+      }
       return SILFunctionTypeRepresentation::Thin;
 
     case SILDeclRef::Kind::Destroyer:
@@ -2533,6 +2659,8 @@ TypeConverter::getBridgedFunctionType(AbstractionPattern pattern,
   CanGenericSignature genericSig = t.getOptGenericSignature();
 
   switch (auto rep = t->getExtInfo().getSILRepresentation()) {
+  // SWIFT_ENABLE_TENSORFLOW
+  case SILFunctionTypeRepresentation::TensorFlow:
   case SILFunctionTypeRepresentation::Thick:
   case SILFunctionTypeRepresentation::Thin:
   case SILFunctionTypeRepresentation::Method:
@@ -2668,6 +2796,8 @@ TypeConverter::getLoweredFormalTypes(SILDeclRef constant,
   CanType bridgedResultType;
 
   switch (rep) {
+  // SWIFT_ENABLE_TENSORFLOW
+  case SILFunctionTypeRepresentation::TensorFlow:
   case SILFunctionTypeRepresentation::Thin:
   case SILFunctionTypeRepresentation::Thick:
   case SILFunctionTypeRepresentation::Method:
