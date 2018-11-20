@@ -53,7 +53,7 @@ public func lintMain(path: String) -> Int {
 ///
 /// - Parameter path: The absolute path to the source file to be linted.
 /// - Returns: Zero if there were no lint errors, otherwise a non-zero number.
-public func formatMain(path: String, isDebugMode: Bool, prettyPrint: Bool) -> Int {
+public func formatMain(path: String, isDebugMode: Bool) -> Int {
   let url = URL(fileURLWithPath: path)
 
   let config = Configuration()
@@ -74,16 +74,12 @@ public func formatMain(path: String, isDebugMode: Bool, prettyPrint: Bool) -> In
     // version of visit(_: SourceFileSyntax), which will not run the pipeline properly.
     let formatted = pipeline.visit(file as Syntax)
 
-    if prettyPrint {
-      let printer = PrettyPrinter(
-        configuration: context.configuration,
-        node: formatted,
-        isDebugMode: isDebugMode
-      )
-      print(printer.prettyPrint(), terminator: "")
-    } else {
-      print(formatted.description, terminator: "")
-    }
+    let printer = PrettyPrinter(
+      configuration: context.configuration,
+      node: formatted,
+      isDebugMode: isDebugMode
+    )
+    print(printer.prettyPrint(), terminator: "")
   } catch {
     fatalError("\(error)")
   }

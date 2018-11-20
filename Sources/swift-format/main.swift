@@ -41,7 +41,6 @@ struct CommandLineOptions: Codable {
   var verboseLevel = 0
   var mode: Mode = .format
   var isDebugMode: Bool = false
-  var prettyPrint: Bool = false
 }
 
 func processArguments(commandName: String, _ arguments: [String]) -> CommandLineOptions {
@@ -86,15 +85,6 @@ func processArguments(commandName: String, _ arguments: [String]) -> CommandLine
   )) {
     $0.isDebugMode = $1
   }
-  binder.bind(
-    option: parser.add(
-      option: "--pretty-print",
-      shortName: "-p",
-      kind: Bool.self,
-      usage: "Pretty-print the output and automatically apply line-wrapping."
-  )) {
-    $0.prettyPrint = $1
-  }
 
   var opts = CommandLineOptions()
   do {
@@ -115,11 +105,7 @@ func main(_ arguments: [String]) -> Int32 {
   case .format:
     var ret = 0
     for path in options.paths {
-      ret |= formatMain(
-        path: path,
-        isDebugMode: options.isDebugMode,
-        prettyPrint: options.prettyPrint
-      )
+      ret |= formatMain(path: path, isDebugMode: options.isDebugMode)
     }
     return Int32(ret)
   case .lint:
